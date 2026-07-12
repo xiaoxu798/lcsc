@@ -5,6 +5,7 @@ initDB();
 $user = requireAdmin();
 $db   = getDB();
 $uid  = $user['id'];
+ensureUserPlatforms($uid);
 
 $flash     = '';
 $flashType = 'ok';
@@ -44,10 +45,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($flash === '') { $flash = 'ok_save'; }
     }
 
-    // 2. 平台URL模板（仅主管理员）
+    // 2. 平台URL模板（所有管理员）
     elseif ($act === 'save_platforms') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
-        $platforms = $db->query("SELECT id, code FROM platforms")->fetchAll();
+        $platStmt = $db->prepare("SELECT id, code FROM platforms WHERE user_id=?");
+        $platStmt->execute([$uid]);
+        $platforms = $platStmt->fetchAll();
         foreach ($platforms as $p) {
             $key = 'url_' . $p['id'];
             if (isset($_POST[$key])) {
@@ -59,9 +61,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $flash = 'ok_save';
     }
 
-    // 2b. 添加平台（仅主管理员）
+    // 2b. 添加平台（所有管理员）
     elseif ($act === 'add_platform') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
         $code = trim($_POST['plat_code'] ?? '');
         $name = trim($_POST['plat_name'] ?? '');
         $url  = trim($_POST['plat_url'] ?? '');
@@ -72,27 +73,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $flash = 'plat_url_invalid';
             $flashType = 'err';
         } else {
-            try {
-                $db->prepare("INSERT INTO platforms (code, name, url_template) VALUES (?, ?, ?)")
-                   ->execute([$code, $name, $url]);
-                // 如果这是第一个平台，自动设为默认
-                $total = (int)$db->query("SELECT COUNT(*) FROM platforms")->fetchColumn();
-                if ($total === 1 || (int)$db->query("SELECT COUNT(*) FROM platforms WHERE is_default=1")->fetchColumn() === 0) {
-                    $newId = (int)$db->lastInsertId();
-                    $db->prepare("UPDATE platforms SET is_default=1 WHERE id=?")->execute([$newId]);
-                }
-                adminLog($uid, '添加平台', "code:{$code} name:{$name}");
-                $flash = 'ok_save';
-            } catch (\Throwable $e) {
+            // 检查同 user_id 下 code 是否重复
+            $dupStmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=? AND code=?");
+            $dupStmt->execute([$uid, $code]);
+            if ((int)$dupStmt->fetchColumn() > 0) {
                 $flash = 'plat_dup';
                 $flashType = 'err';
+            } else {
+                try {
+                    $db->prepare("INSERT INTO platforms (user_id, code, name, url_template) VALUES (?, ?, ?, ?)")
+                       ->execute([$uid, $code, $name, $url]);
+                    // 如果这是第一个平台，自动设为默认
+                    $totalStmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=?");
+                    $totalStmt->execute([$uid]);
+                    $total = (int)$totalStmt->fetchColumn();
+                    if ($total === 1) {
+                        $newId = (int)$db->lastInsertId();
+                        $db->prepare("UPDATE platforms SET is_default=1 WHERE id=? AND user_id=?")->execute([$newId, $uid]);
+                    } else {
+                        $defStmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=? AND is_default=1");
+                        $defStmt->execute([$uid]);
+                        if ((int)$defStmt->fetchColumn() === 0) {
+                            $newId = (int)$db->lastInsertId();
+                            $db->prepare("UPDATE platforms SET is_default=1 WHERE id=? AND user_id=?")->execute([$newId, $uid]);
+                        }
+                    }
+                    adminLog($uid, '添加平台', "code:{$code} name:{$name}");
+                    $flash = 'ok_save';
+                } catch (\Throwable $e) {
+                    $flash = 'plat_dup';
+                    $flashType = 'err';
+                }
             }
         }
     }
 
-    // 2c. 编辑平台（仅主管理员）
+    // 2c. 编辑平台（所有管理员）
     elseif ($act === 'edit_platform') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
         $pid  = (int)($_POST['plat_id'] ?? 0);
         $code = trim($_POST['plat_code'] ?? '');
         $name = trim($_POST['plat_name'] ?? '');
@@ -103,8 +120,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $flashType = 'err';
             } else {
             try {
-                $db->prepare("UPDATE platforms SET code=?, name=?, url_template=? WHERE id=?")
-                   ->execute([$code, $name, $url, $pid]);
+                $db->prepare("UPDATE platforms SET code=?, name=?, url_template=? WHERE id=? AND user_id=?")
+                   ->execute([$code, $name, $url, $pid, $uid]);
                 adminLog($uid, '编辑平台', "id:{$pid} code:{$code}");
                 $flash = 'ok_save';
             } catch (\Throwable $e) {
@@ -115,13 +132,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // 2d. 删除平台（仅主管理员）
+    // 2d. 删除平台（所有管理员）
     elseif ($act === 'delete_platform') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
         $pid = (int)($_POST['plat_id'] ?? 0);
         if ($pid > 0) {
             // 至少保留 1 个平台，只剩 1 个时不允许删除
-            $totalPlatforms = (int)$db->query("SELECT COUNT(*) FROM platforms")->fetchColumn();
+            $totalStmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=?");
+            $totalStmt->execute([$uid]);
+            $totalPlatforms = (int)$totalStmt->fetchColumn();
             if ($totalPlatforms <= 1) {
                 $flash = 'plat_last';
                 $flashType = 'err';
@@ -129,7 +147,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 try {
                     $db->beginTransaction();
                     // 记录删除前该平台下的元件数
-                    $delCount = (int)$db->query("SELECT COUNT(*) FROM parts WHERE platform_id=$pid")->fetchColumn();
+                    $delCountStmt = $db->prepare("SELECT COUNT(*) FROM parts WHERE platform_id=?");
+                    $delCountStmt->execute([$pid]);
+                    $delCount = (int)$delCountStmt->fetchColumn();
                     // 删除该平台下所有元件相关数据（stock_log, price_history, scan_log, part_categories）
                     $db->exec("DELETE sl FROM stock_log sl INNER JOIN parts p ON p.id=sl.part_id WHERE p.platform_id=$pid");
                     $db->exec("DELETE ph FROM price_history ph INNER JOIN parts p ON p.id=ph.part_id WHERE p.platform_id=$pid");
@@ -138,7 +158,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // 删除元件
                     $db->exec("DELETE FROM parts WHERE platform_id=$pid");
                     // 删除平台
-                    $affected = $db->exec("DELETE FROM platforms WHERE id=$pid");
+                    $delPlat = $db->prepare("DELETE FROM platforms WHERE id=? AND user_id=?");
+                    $delPlat->execute([$pid, $uid]);
+                    $affected = $delPlat->rowCount();
                     if ($affected === 0) {
                         $db->rollBack();
                         $flash = 'plat_del_failed';
@@ -146,9 +168,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         adminLog($uid, '删除平台失败', "id:{$pid}, 平台不存在");
                     } else {
                         // 确保至少有一个默认平台
-                        $hasDefault = (int)$db->query("SELECT COUNT(*) FROM platforms WHERE is_default=1")->fetchColumn();
+                        $defStmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=? AND is_default=1");
+                        $defStmt->execute([$uid]);
+                        $hasDefault = (int)$defStmt->fetchColumn();
                         if ($hasDefault === 0) {
-                            $db->exec("UPDATE platforms SET is_default=1 ORDER BY id LIMIT 1");
+                            $db->prepare("UPDATE platforms SET is_default=1 WHERE user_id=? ORDER BY id LIMIT 1")->execute([$uid]);
                         }
                         $db->commit();
                         adminLog($uid, '删除平台', "id:{$pid}, 同时删除了 {$delCount} 条元件数据");
@@ -164,13 +188,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // 2e. 设为默认平台（仅主管理员）
+    // 2e. 设为默认平台（所有管理员）
     elseif ($act === 'set_default_platform') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
         $pid = (int)($_POST['plat_id'] ?? 0);
         if ($pid > 0) {
-            $db->exec("UPDATE platforms SET is_default=0");
-            $db->prepare("UPDATE platforms SET is_default=1 WHERE id=?")->execute([$pid]);
+            $db->prepare("UPDATE platforms SET is_default=0 WHERE user_id=?")->execute([$uid]);
+            $db->prepare("UPDATE platforms SET is_default=1 WHERE id=? AND user_id=?")->execute([$pid, $uid]);
             adminLog($uid, '设置默认平台', "id:{$pid}");
             $flash = 'ok_save';
         }
@@ -241,7 +264,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $subPw   = $_POST['sub_password'] ?? '';
         // 权限白名单校验
         $rawPerms = $_POST['sub_perms'] ?? [];
-        $permAllowlist = ['can_edit','can_delete','can_import','can_manage_categories','can_batch','can_export'];
+        $permAllowlist = ['can_edit','can_delete','can_import','can_manage_categories','can_batch','can_export','can_scan','can_print'];
         $cleanPerms = array_values(array_intersect($rawPerms, $permAllowlist));
         $perms   = json_encode($cleanPerms, JSON_UNESCAPED_UNICODE);
         if (strlen($subName) < 3 || !isStrongPassword($subPw)) {
@@ -266,7 +289,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tid = (int)($_POST['target_id'] ?? 0);
         // 权限白名单校验
         $rawPerms = $_POST['sub_perms'] ?? [];
-        $permAllowlist = ['can_edit','can_delete','can_import','can_manage_categories','can_batch','can_export'];
+        $permAllowlist = ['can_edit','can_delete','can_import','can_manage_categories','can_batch','can_export','can_scan','can_print'];
         $cleanPerms = array_values(array_intersect($rawPerms, $permAllowlist));
         $perms = json_encode($cleanPerms, JSON_UNESCAPED_UNICODE);
         if ($tid > 0) {
@@ -306,9 +329,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $flash = 'ok_save';
     }
 
-    // 5. 数据备份（仅主管理员）
+    // 5. 数据备份（所有管理员）
     elseif ($act === 'backup') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
         @set_time_limit(300);
         @ini_set('memory_limit', '512M');
         try {
@@ -391,9 +413,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // 5. 数据恢复（仅主管理员）
+    // 5. 数据恢复（所有管理员）
     elseif ($act === 'restore') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
         if (empty($_FILES['backup_file']['tmp_name']) || $_FILES['backup_file']['error'] !== UPLOAD_ERR_OK) {
             $flash     = 'restore_no_file';
             $flashType = 'err';
@@ -485,7 +506,9 @@ foreach (['site_title', 'site_logo', 'register_mode', 'notice_content', 'notice_
     $settings[$k] = getSetting($k);
 }
 
-$platforms = $db->query("SELECT id, code, name, url_template, is_default FROM platforms ORDER BY id")->fetchAll();
+$platStmt = $db->prepare("SELECT id, code, name, url_template, is_default FROM platforms WHERE user_id=? ORDER BY id");
+$platStmt->execute([$uid]);
+$platforms = $platStmt->fetchAll();
 
 $users = $db->query("SELECT id, username, role, parent_id, must_change_pw, created_at, last_login FROM users ORDER BY id")->fetchAll();
 
@@ -521,15 +544,17 @@ require 'layout_head.php';
 @media(max-width:768px){.admin-grid2{grid-template-columns:1fr;}}
 .backup-info{font-size:13px;color:var(--text2);margin-bottom:14px;line-height:1.8;}
 .backup-info code{background:var(--surface2);padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent);}
-.log-row{display:grid;grid-template-columns:120px 80px 100px 1fr 110px;gap:10px;padding:6px 0;border-top:1px solid var(--border);font-size:12px;align-items:flex-start;}
+.log-row{display:grid;grid-template-columns:130px 90px 110px 1fr 120px;gap:10px;padding:8px 0;border-top:1px solid var(--border);font-size:12px;align-items:flex-start;}
+.log-header{display:grid;grid-template-columns:130px 90px 110px 1fr 120px;gap:10px;padding:8px 0;border-bottom:2px solid var(--border);font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;}
 .log-time{color:var(--text3);white-space:nowrap;}
 .log-user{color:var(--accent);}
 .log-action{}
-.log-detail{color:var(--text2);word-break:break-all;}
+.log-detail{color:var(--text2);word-break:break-all;min-width:0;}
 .log-ip{color:var(--text3);font-family:'JetBrains Mono',monospace;font-size:11px;text-align:right;white-space:nowrap;}
 @media(max-width:600px){
-  .log-row{grid-template-columns:1fr;gap:2px;}
+  .log-row,.log-header{grid-template-columns:1fr;gap:2px;}
   .log-ip{text-align:left;}
+  .log-header{display:none;}
 }
 </style>
 
@@ -593,10 +618,11 @@ if ($flash !== '') {
     <button class="admin-tab" data-tab="tab-platforms">🔗 平台URL</button>
     <button class="admin-tab" data-tab="tab-users">👥 用户管理</button>
     <button class="admin-tab" data-tab="tab-invites">🎫 邀请码</button>
-    <button class="admin-tab" data-tab="tab-backup">💾 数据备份</button>
 <?php else: ?>
-    <button class="admin-tab active" data-tab="tab-subusers">👤 子用户管理</button>
+    <button class="admin-tab active" data-tab="tab-platforms">🔗 平台URL</button>
+    <button class="admin-tab" data-tab="tab-subusers">👤 子用户</button>
 <?php endif; ?>
+    <button class="admin-tab" data-tab="tab-backup">💾 数据备份</button>
     <button class="admin-tab" data-tab="tab-logs">📋 操作日志</button>
 </div>
 
@@ -667,11 +693,12 @@ if ($flash !== '') {
 </form>
 </div>
 </div>
+<?php endif; // 主管理员专有内容结束 ?>
 
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- 2. 平台管理（增删改） -->
 <!-- ═══════════════════════════════════════════════════════ -->
-<div class="admin-panel" id="tab-platforms">
+<div class="admin-panel<?= isPrimaryAdmin() ? '' : ' active' ?>" id="tab-platforms">
 <div class="card card-pad">
 <div class="sec-title">平台管理</div>
 <p class="backup-info">
@@ -756,6 +783,7 @@ if ($flash !== '') {
 </div>
 </div>
 
+<?php if(isPrimaryAdmin()): ?>
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- 3. 用户管理 -->
 <!-- ═══════════════════════════════════════════════════════ -->
@@ -828,7 +856,7 @@ if ($flash !== '') {
 <!-- 子用户管理（所有管理员可见） -->
 <!-- ═══════════════════════════════════════════════════════ -->
 <?php if(!isPrimaryAdmin()): ?>
-<div class="admin-panel active" id="tab-subusers">
+<div class="admin-panel" id="tab-subusers">
 <?php endif; ?>
 <div class="card card-pad" style="margin-top:16px">
 <div class="sec-title">👤 子用户管理（共享物料库，可自定义权限）</div>
@@ -845,6 +873,8 @@ $permLabels = [
     'can_manage_categories' => '管理分类',
     'can_batch'             => '批量操作',
     'can_export'            => '导出数据',
+    'can_scan'              => '扫码出入库',
+    'can_print'             => '打印标签',
 ];
 
 function parsePerms(?string $json): array {
@@ -1041,6 +1071,7 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
 <?php endif; ?>
 </div>
 </div>
+<?php endif; // 主管理员专有内容结束 ?>
 
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- 5. 数据备份 -->
@@ -1089,11 +1120,11 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
 <div class="table-wrap">
 <table>
 <thead><tr>
-    <th>时间</th>
-    <th>操作</th>
-    <th>用户</th>
+    <th style="width:130px">时间</th>
+    <th style="width:70px">操作</th>
+    <th style="width:90px">用户</th>
     <th>文件名</th>
-    <th>文件大小</th>
+    <th style="width:100px;text-align:right">文件大小</th>
 </tr></thead>
 <tbody>
 <?php foreach ($backupLogs as $bl): ?>
@@ -1108,7 +1139,7 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
     </td>
     <td style="font-size:12px"><?=h($bl['username'] ?? '?')?></td>
     <td style="font-size:12px;font-family:'JetBrains Mono',monospace"><?=h($bl['file_name'] ?? '—')?></td>
-    <td style="font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace">
+    <td style="font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace;text-align:right">
         <?php
         $size = (int)($bl['file_size'] ?? 0);
         if ($size >= 1048576) echo number_format($size / 1048576, 2) . ' MB';
@@ -1126,7 +1157,6 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
 <?php endif; ?>
 </div>
 </div>
-<?php endif; // 主管理员专有内容结束 ?>
 
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- 6. 操作日志 -->
@@ -1136,6 +1166,13 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
 <div class="sec-title">操作日志（最近50条）</div>
 <?php if ($adminLogs): ?>
 <div style="max-height:600px;overflow-y:auto">
+<div class="log-header">
+    <span>时间</span>
+    <span>用户</span>
+    <span>操作</span>
+    <span>详情</span>
+    <span style="text-align:right">IP</span>
+</div>
 <?php foreach ($adminLogs as $al): ?>
 <div class="log-row">
     <span class="log-time"><?=h(substr((string)$al['created_at'], 0, 16))?></span>
@@ -1182,6 +1219,16 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
     const hash = window.location.hash.replace('#', '');
     if (hash && document.getElementById(hash)) {
         activateTab(hash);
+    } else {
+        // 兜底：如果URL无hash，激活已标记为active的tab对应面板
+        const activeTab = document.querySelector('.admin-tab.active');
+        if (activeTab) {
+            const tabId = activeTab.getAttribute('data-tab');
+            const panel = document.getElementById(tabId);
+            if (panel && !panel.classList.contains('active')) {
+                panel.classList.add('active');
+            }
+        }
     }
 })();
 

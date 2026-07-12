@@ -182,18 +182,20 @@ function initDB(): void {
 
     $db->exec("CREATE TABLE IF NOT EXISTS platforms (
         id           INT AUTO_INCREMENT PRIMARY KEY,
-        code         VARCHAR(50) UNIQUE NOT NULL,
+        user_id      INT NOT NULL DEFAULT 1,
+        code         VARCHAR(50) NOT NULL,
         name         VARCHAR(100) NOT NULL,
         url_template VARCHAR(500) DEFAULT '',
-        is_default   TINYINT(1) NOT NULL DEFAULT 0
+        is_default   TINYINT(1) NOT NULL DEFAULT 0,
+        INDEX idx_plat_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
     // 仅在首次初始化（表为空）时插入默认平台，之后不再自动插入
     $platCount = (int)$db->query("SELECT COUNT(*) FROM platforms")->fetchColumn();
     if ($platCount === 0) {
-        $db->exec("INSERT INTO platforms (code,name,url_template,is_default) VALUES
-            ('lcsc','立创商城','https://so.szlcsc.com/global.html?k={part_no}',1),
-            ('other','其他','',0)");
+        $db->exec("INSERT INTO platforms (user_id,code,name,url_template,is_default) VALUES
+            (1,'lcsc','立创商城','https://so.szlcsc.com/global.html?k={part_no}',1),
+            (1,'other','其他','',0)");
     }
 
     if ($schemaVer < 3) {
@@ -209,12 +211,41 @@ function initDB(): void {
         $db->prepare("UPDATE settings SET v='7' WHERE k='schema_version'")->execute();
     }
 
-    // V8 升级：修复 stock_log ENUM，添加撤销操作类型
+    // V8 升级：修复 stock_log ENUM，添加撤销操作类型和BOM出库类型
     if ($schemaVer < 8) {
         try {
-            $db->exec("ALTER TABLE stock_log MODIFY change_type ENUM('import','manual_in','manual_out','adjust','scan_in','scan_out','damaged','repair','scan_undo_in','scan_undo_out') NOT NULL");
+            $db->exec("ALTER TABLE stock_log MODIFY change_type ENUM('import','manual_in','manual_out','adjust','scan_in','scan_out','damaged','repair','scan_undo_in','scan_undo_out','bom_out') NOT NULL");
         } catch (\Throwable $e) {}
         $db->prepare("UPDATE settings SET v='8' WHERE k='schema_version'")->execute();
+    }
+
+    // V9 升级：将 change_type 从 ENUM 改为 VARCHAR，避免新增类型时 1265 截断错误
+    if ($schemaVer < 9) {
+        try {
+            $db->exec("ALTER TABLE stock_log MODIFY change_type VARCHAR(30) NOT NULL");
+        } catch (\Throwable $e) {}
+        $db->prepare("UPDATE settings SET v='9' WHERE k='schema_version'")->execute();
+    }
+
+    // V10 升级：platforms 表添加 user_id，支持每个管理员独立管理平台
+    if ($schemaVer < 10) {
+        try {
+            $db->exec("ALTER TABLE platforms ADD COLUMN user_id INT NOT NULL DEFAULT 1");
+            $db->exec("ALTER TABLE platforms ADD INDEX idx_plat_user (user_id)");
+        } catch (\Throwable $e) {}
+        // 移除 code 的全局 UNIQUE 约束（改为应用层按 user_id 校验）
+        try { $db->exec("ALTER TABLE platforms DROP INDEX code"); } catch (\Throwable $e) {}
+        // 为所有现有子用户添加 can_scan 和 can_print 权限（保持原有功能可用）
+        $subUsers = $db->query("SELECT id, permissions FROM users WHERE role='user' AND parent_id IS NOT NULL")->fetchAll();
+        foreach ($subUsers as $su) {
+            $perms = json_decode($su['permissions'] ?? '[]', true);
+            if (!is_array($perms)) $perms = [];
+            if (!in_array('can_scan', $perms)) $perms[] = 'can_scan';
+            if (!in_array('can_print', $perms)) $perms[] = 'can_print';
+            $db->prepare("UPDATE users SET permissions=? WHERE id=?")
+               ->execute([json_encode($perms, JSON_UNESCAPED_UNICODE), $su['id']]);
+        }
+        $db->prepare("UPDATE settings SET v='10' WHERE k='schema_version'")->execute();
     }
 
     // 分类表
@@ -276,7 +307,7 @@ function initDB(): void {
         user_id          INT NOT NULL,
         part_id          INT,
         platform_part_no VARCHAR(100),
-        change_type      ENUM('import','manual_in','manual_out','adjust','scan_in','scan_out','damaged','repair','scan_undo_in','scan_undo_out') NOT NULL,
+        change_type      VARCHAR(30) NOT NULL,
         qty_change       INT NOT NULL,
         qty_before       INT NOT NULL,
         qty_after        INT NOT NULL,
@@ -348,6 +379,20 @@ function initDB(): void {
         reason      VARCHAR(500),
         created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_import (import_id),
+        INDEX idx_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // BOM出库记录
+    $db->exec("CREATE TABLE IF NOT EXISTS bom_exports (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        user_id     INT NOT NULL,
+        file_name   VARCHAR(255) NOT NULL,
+        total_rows  INT DEFAULT 0,
+        matched     INT DEFAULT 0,
+        not_found   INT DEFAULT 0,
+        insufficient INT DEFAULT 0,
+        total_qty   INT DEFAULT 0,
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
@@ -517,13 +562,25 @@ function getDataUserId(): int {
     return ($u['parent_id'] ?? null) ? (int)$u['parent_id'] : (int)$u['id'];
 }
 
+/** 确保管理员拥有默认平台（首次访问时自动创建）*/
+function ensureUserPlatforms(int $adminUid): void {
+    if ($adminUid <= 0) return;
+    $db = getDB();
+    $stmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=?");
+    $stmt->execute([$adminUid]);
+    if ((int)$stmt->fetchColumn() === 0) {
+        $db->prepare("INSERT INTO platforms (user_id,code,name,url_template,is_default) VALUES (?, 'lcsc', '立创商城', 'https://so.szlcsc.com/global.html?k={part_no}', 1)")->execute([$adminUid]);
+        $db->prepare("INSERT INTO platforms (user_id,code,name,url_template,is_default) VALUES (?, 'other', '其他', '', 0)")->execute([$adminUid]);
+    }
+}
+
 /** 获取当前用户的权限列表（子用户从数据库读取，管理员全权限） */
 function getUserPermissions(): array {
     $u = currentUser();
     if (!$u) return [];
     // 管理员拥有所有权限
     if (($u['role'] ?? '') === 'admin') {
-        return ['can_edit','can_delete','can_import','can_manage_categories','can_batch','can_export'];
+        return ['can_edit','can_delete','can_import','can_manage_categories','can_batch','can_export','can_scan','can_print'];
     }
     // 子用户/普通用户从 permissions 字段读取
     if (!empty($u['permissions'])) {

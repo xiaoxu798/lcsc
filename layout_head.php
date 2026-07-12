@@ -255,13 +255,13 @@ tbody tr:hover td{background:var(--surface2);}
   .topbar-right{gap:4px;margin-left:0;}
   .topbar-right .icon-btn:not(#themeBtn){display:none !important;}
   .topbar-right .icon-btn#themeBtn{padding:4px 8px;font-size:11px;}
-  /* Mobile bottom nav bar: only theme toggle + more */
-  .mobile-nav{display:flex !important;position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);z-index:199;padding:6px 8px;padding-bottom:max(6px,env(safe-area-inset-bottom));gap:8px;justify-content:center;}
-  .mobile-nav a,.mobile-nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 14px;border-radius:8px;font-size:10px;color:var(--text2);text-decoration:none;background:none;border:none;cursor:pointer;min-width:56px;}
+  /* Mobile bottom nav bar: 一级导航（库存/扫码/更多/退出） */
+  .mobile-nav{display:flex !important;position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);z-index:199;padding:6px 8px;padding-bottom:max(6px,env(safe-area-inset-bottom));gap:4px;justify-content:space-around;align-items:stretch;}
+  .mobile-nav a,.mobile-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 10px;border-radius:8px;font-size:10px;color:var(--text2);text-decoration:none;background:none;border:none;cursor:pointer;min-width:0;flex:1;max-width:90px;}
   .mobile-nav a.active,.mobile-nav a:hover{color:var(--accent);background:var(--accent-dim);}
   .mobile-nav .m-icon{font-size:20px;line-height:1;}
-  .mobile-nav .theme-btn{font-size:11px;color:var(--text2);}
-  .mobile-nav .more-btn{font-size:11px;color:var(--text2);}
+  .mobile-nav .more-btn{font-size:10px;color:var(--text2);}
+  .mobile-nav .more-btn.active{color:var(--accent);background:var(--accent-dim);}
   /* Mobile more menu overlay */
   .mobile-more-menu{display:none;position:fixed;bottom:65px;left:8px;right:8px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:8px;z-index:310;box-shadow:0 -4px 20px var(--shadow);flex-wrap:wrap;gap:4px;max-height:60vh;overflow-y:auto;}
   .mobile-more-menu.show{display:flex;}
@@ -311,6 +311,7 @@ tbody tr:hover td{background:var(--surface2);}
         <a href="index.php" <?=$activePage==='index'?'class="active"':''?>>库存</a>
         <a href="scan.php" <?=$activePage==='scan'?'class="active"':''?>>扫码</a>
         <a href="import.php" <?=$activePage==='import'?'class="active"':''?>>导入</a>
+        <a href="bom_export.php" <?=$activePage==='bom_export'?'class="active"':''?>>BOM出库</a>
         <a href="categories.php" <?=$activePage==='categories'?'class="active"':''?>>分类</a>
         <span class="nav-sep"></span>
         <a href="log.php" <?=$activePage==='log'?'class="active"':''?>>记录</a>
@@ -327,28 +328,34 @@ tbody tr:hover td{background:var(--surface2);}
     </div>
 </div>
 
-<!-- ── 移动端底部导航栏（仅主题切换 + 更多）── -->
+<!-- ── 移动端底部导航栏（一级导航 + 更多）── -->
 <div class="mobile-nav" id="mobileNav">
-    <button class="theme-btn" onclick="toggleTheme()" title="切换主题">
-        <span class="m-icon">🌓</span>主题
-    </button>
+    <a href="index.php" class="<?=$activePage==='index'?'active':''?>">
+        <span class="m-icon">📦</span>库存
+    </a>
+    <a href="scan.php" class="<?=$activePage==='scan'?'active':''?>">
+        <span class="m-icon">📷</span>扫码
+    </a>
     <button class="more-btn" onclick="toggleMobileMore()" id="mobileMoreBtn">
         <span class="m-icon">⋯</span>更多
     </button>
+    <form method="post" action="logout.php" style="display:inline;margin:0;padding:0">
+        <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+        <button type="submit" style="border:none;background:none;cursor:pointer;font:inherit;color:inherit;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 14px;border-radius:8px;font-size:10px;color:var(--text2);min-width:56px">
+            <span class="m-icon">🚪</span>退出
+        </button>
+    </form>
 </div>
 
 <!-- 移动端更多菜单背景遮罩 -->
 <div class="mobile-more-backdrop" id="mobileMoreBackdrop" onclick="closeMobileMore()"></div>
 <!-- 移动端更多菜单 -->
 <div class="mobile-more-menu" id="mobileMoreMenu">
-    <a href="index.php" class="<?=$activePage==='index'?'active':''?>">
-        <span class="mm-icon">📦</span>库存
-    </a>
-    <a href="scan.php" class="<?=$activePage==='scan'?'active':''?>">
-        <span class="mm-icon">📷</span>扫码
-    </a>
     <a href="import.php" class="<?=$activePage==='import'?'active':''?>">
         <span class="mm-icon">📥</span>导入
+    </a>
+    <a href="bom_export.php" class="<?=$activePage==='bom_export'?'active':''?>">
+        <span class="mm-icon">📋</span>BOM出库
     </a>
     <a href="categories.php" class="<?=$activePage==='categories'?'active':''?>">
         <span class="mm-icon">🏷️</span>分类
@@ -367,17 +374,11 @@ tbody tr:hover td{background:var(--surface2);}
     <a href="change_password.php">
         <span class="mm-icon">🔑</span>改密
     </a>
-    <form method="post" action="logout.php" style="display:inline;margin:0">
-        <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
-        <button type="submit" style="border:none;background:none;cursor:pointer;font:inherit;color:inherit;padding:8px 12px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px">
-            <span class="mm-icon">🚪</span>退出
-        </button>
-    </form>
 </div>
 
 <!-- ── 底部版权（由 JS 移动到页面末尾）── -->
 <footer class="site-footer" style="text-align:center;padding:10px 12px;font-size:11px;color:var(--text3);border-top:1px solid var(--border);">
-    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">元件库存管理系统 v1.0</a>
+    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">元件库存管理系统 v1.0.2</a>
     &middot;
     &copy; <?= date('Y') ?> <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">xiaoxu798</a>
     &middot;

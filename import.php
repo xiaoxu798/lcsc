@@ -65,7 +65,9 @@ $platformMaps = [
     ],
 ];
 
-$platforms = $db->query("SELECT * FROM platforms ORDER BY id")->fetchAll();
+$platStmt = $db->prepare("SELECT * FROM platforms WHERE user_id=? ORDER BY id");
+$platStmt->execute([$dataUid]);
+$platforms = $platStmt->fetchAll();
 // 找到默认平台
 $defaultPlat = 'lcsc';
 foreach ($platforms as $pp) { if (($pp['is_default'] ?? 0) == 1) { $defaultPlat = $pp['code']; break; } }
@@ -73,8 +75,8 @@ foreach ($platforms as $pp) { if (($pp['is_default'] ?? 0) == 1) { $defaultPlat 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excel'])) {
     $file     = $_FILES['excel'];
     $platCode = $_POST['platform'] ?? $defaultPlat;
-    $pr       = $db->prepare("SELECT id FROM platforms WHERE code=?");
-    $pr->execute([$platCode]); $pr = $pr->fetch();
+    $pr       = $db->prepare("SELECT id FROM platforms WHERE code=? AND user_id=?");
+    $pr->execute([$platCode, $dataUid]); $pr = $pr->fetch();
     $platId   = $pr ? (int)$pr['id'] : 1;
     $fmap     = $platformMaps[$platCode] ?? $platformMaps[$defaultPlat];
     $importId = bin2hex(random_bytes(16));

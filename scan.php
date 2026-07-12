@@ -3,8 +3,10 @@ declare(strict_types=1);
 require_once 'config.php';
 initDB();
 $user = requireLogin();
+if (!hasPermission('can_scan')) { header('Location: index.php'); exit; }
 $db   = getDB();
 $uid  = $user['id'];
+$dataUid = getDataUserId();
 
 // ── 处理扫描结果（从 session）──
 $scanResult = $_SESSION['scan_result'] ?? null;
@@ -22,7 +24,9 @@ if ($scanError !== null) {
 $flash = $_GET['flash'] ?? null;
 
 // ── 平台列表 ──
-$platforms = $db->query("SELECT id, code, name, is_default FROM platforms ORDER BY id ASC")->fetchAll();
+$platStmt = $db->prepare("SELECT id, code, name, is_default FROM platforms WHERE user_id=? ORDER BY id ASC");
+$platStmt->execute([$dataUid]);
+$platforms = $platStmt->fetchAll();
 
 // ── 今日扫码统计 ──
 $today = date('Y-m-d');
@@ -42,7 +46,7 @@ $recentScans = $db->prepare(
      LEFT JOIN parts p ON p.id = sl.part_id
      WHERE sl.user_id = ?
      ORDER BY sl.created_at DESC
-     LIMIT 20"
+     LIMIT 30"
 );
 $recentScans->execute([$uid]);
 $recentScans = $recentScans->fetchAll();
@@ -53,6 +57,7 @@ $extraTopbarRight   = '<a href="index.php" class="btn btn-ghost btn-sm">← 返�
 require 'layout_head.php';
 ?>
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="scan_decoder.js"></script>
 <style>
 /* ── 扫码模式切换 ── */
 .scan-mode-bar{display:flex;gap:4px;margin-bottom:14px;}
@@ -142,9 +147,9 @@ require 'layout_head.php';
 /* ── 摄像头扫码区域 ── */
 .camera-section{display:none;margin-bottom:14px;}
 .camera-section.open{display:block;}
-#cameraView{width:100%;border-radius:8px;overflow:hidden;background:#000;position:relative;min-height:200px;}
+#cameraView{width:100%;border-radius:8px;overflow:hidden;background:#000;position:relative;min-height:240px;}
 #cameraView video{width:100%;display:block;}
-.camera-controls{display:flex;gap:8px;margin-top:8px;align-items:center;}
+.camera-controls{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;}
 .camera-status{font-size:12px;color:var(--text2);margin-left:auto;}
 .camera-flash{animation:cameraFlash .3s ease;}
 @keyframes cameraFlash{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.6);}50%{box-shadow:0 0 0 6px rgba(34,197,94,0);}}
@@ -193,6 +198,35 @@ require 'layout_head.php';
 .scanner-verify-bar-fill{height:100%;background:var(--accent);transition:width 1s linear;}
 @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
 @keyframes slideUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+
+/* ── 扫码结果弹窗 ── */
+.modal-overlay{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;animation:fadeIn .2s ease;padding:16px;}
+.modal-overlay .modal{animation:slideUp .25s ease;}
+.info-table td{vertical-align:middle;}
+.info-table td:first-child{width:90px;color:var(--text2);}
+
+/* ── 移动端排版优化 ── */
+@media (max-width: 600px) {
+    .today-stats{gap:6px;}
+    .today-stat{padding:8px 10px;min-width:0;flex:1 1 calc(50% - 6px);}
+    .today-stat .stat-num{font-size:18px;}
+    .today-stat .stat-label{font-size:10px;}
+    .device-status-bar{gap:6px;}
+    .device-status{font-size:10px;padding:4px 8px;flex:1;}
+    .camera-section{margin-bottom:10px;}
+    #cameraView{min-height:200px;}
+    .camera-controls{gap:6px;}
+    .camera-controls .btn{font-size:11px;padding:6px 10px;}
+    .form-row{flex-direction:column;gap:10px;}
+    .form-row .form-group{min-width:0 !important;flex:1 !important;}
+    .qty-quick-bar{flex-wrap:wrap;gap:4px;}
+    .qty-quick-bar input{width:60px !important;}
+    .qty-quick-bar .btn{padding:6px 8px;font-size:12px;}
+    .modal-overlay{padding:12px;}
+    .modal-overlay .modal{max-width:100% !important;width:100%;}
+    .info-table td:first-child{width:70px;font-size:12px;}
+    .info-table td{font-size:13px !important;}
+}
 </style>
 
 <div class="main page-mid">
@@ -310,8 +344,6 @@ require 'layout_head.php';
 
 <!-- ── 扫码输入卡片 ── -->
 <div class="card card-pad" style="margin-bottom:16px;">
-    <h3 style="font-size:15px;margin-bottom:6px;">扫码输入</h3>
-
     <!-- 扫码类型切换 -->
     <div class="scan-mode-bar">
         <button type="button" class="pill out-pill active" id="pillOut" onclick="setScanType('scan_out')">📤 出库</button>
@@ -337,27 +369,27 @@ require 'layout_head.php';
         <div id="cameraView"></div>
         <div class="camera-controls">
             <button type="button" class="btn btn-ghost btn-sm" id="cameraToggleBtn" onclick="toggleCamera()">📷 关闭摄像头</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="captureBtn" onclick="captureAndScan()" style="display:none;">📸 截图识别</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="torchBtn" onclick="toggleTorch()" style="display:none;">🔦 闪光灯</button>
             <span class="camera-status" id="cameraStatusText">📷 摄像头就绪</span>
         </div>
     </div>
 
-    <!-- 条码输入 -->
+    <!-- 扫码表单 -->
     <form method="post" action="action.php" id="scanForm">
         <input type="hidden" name="_csrf" value="<?= csrf() ?>">
         <input type="hidden" name="action" id="scanAction" value="scan_out">
         <input type="hidden" name="ajax" id="scanAjax" value="1">
-
+        <input type="hidden" name="order_no" id="scanOrderNo" value="">
+        <input type="hidden" name="scan_source" id="scanSource" value="">
+        <!-- 扫码输入区：输入框 + 摄像头按钮 -->
         <div class="scan-input-area">
-            <input type="text" name="barcode" id="barcodeInput"
-                   placeholder="扫描条码或输入编号，回车提交..."
-                   autocomplete="off" autofocus>
-            <button type="button" class="scan-cam-btn" onclick="toggleCamera()" title="点击激活摄像头扫码（F3）" id="scanCamBtn">
-                📷
-            </button>
+            <input type="text" name="barcode" id="barcodeInput" autocomplete="off" placeholder="扫码 / 输入商品编号后回车">
+            <button type="button" class="scan-cam-btn" id="scanCamBtn" onclick="toggleCamera()" title="摄像头扫码">📷</button>
         </div>
 
         <!-- 数量 + 平台 -->
-        <div class="form-row" style="margin-bottom:14px;">
+        <div class="form-row" style="margin-bottom:0;">
             <div class="form-group" style="margin-bottom:0;flex:0 0 auto;min-width:280px;">
                 <label>数量</label>
                 <div class="qty-quick-bar">
@@ -382,23 +414,22 @@ require 'layout_head.php';
                 </select>
             </div>
         </div>
-
-        <button type="submit" class="btn btn-primary btn-full" style="font-size:14px;padding:10px;">
-            确认提交
-        </button>
     </form>
 </div>
 
-<!-- ── 最近一次操作（含撤销） ── -->
-<div class="card card-pad" id="lastScanCard" style="display:none;margin-bottom:14px;border-left:4px solid var(--accent);">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-        <h3 style="font-size:14px;margin:0;">📋 最近操作</h3>
-        <button type="button" id="undoBtn" class="btn btn-ghost btn-sm" onclick="undoLastScan()" style="font-size:12px;color:var(--red);border-color:var(--red);">↩ 撤销</button>
+<!-- ── 扫码结果弹窗（仅显示信息，自动关闭） ── -->
+<div class="modal-overlay" id="scanResultModal" style="display:none;z-index:9999;">
+    <div class="modal" style="max-width:360px;">
+        <div class="modal-header">
+            <h3 id="scanResultTitle" style="margin:0;font-size:16px;">扫码结果</h3>
+        </div>
+        <div class="modal-body" id="scanResultBody" style="padding:16px 20px;">
+            <!-- 动态内容 -->
+        </div>
     </div>
-    <div id="lastScanContent" style="font-size:13px;color:var(--text2);"></div>
 </div>
 
-<!-- ── 最近扫描记录 ── -->
+<!-- ── 最近扫描记录（30条，10条一页） ── -->
 <div class="card card-pad" style="margin-bottom:16px;">
     <h3 style="font-size:15px;margin-bottom:12px;">最近扫描记录</h3>
     <div id="recentScanList">
@@ -406,7 +437,7 @@ require 'layout_head.php';
     <div class="empty-state" style="padding:24px 0;">暂无扫描记录</div>
     <?php else: ?>
     <div class="table-wrap" style="border-radius:8px;">
-        <table style="font-size:12px;">
+        <table style="font-size:12px;" id="recentScanTable">
             <thead>
                 <tr>
                     <th>时间</th>
@@ -417,11 +448,12 @@ require 'layout_head.php';
                     <th style="text-align:right">变化前</th>
                     <th style="text-align:right">变化后</th>
                     <th>备注</th>
+                    <th style="width:50px;">操作</th>
                 </tr>
             </thead>
             <tbody>
-            <?php foreach ($recentScans as $r): ?>
-                <tr>
+            <?php foreach ($recentScans as $i => $r): ?>
+                <tr class="scan-row" data-page="<?= floor($i / 10) + 1 ?>">
                     <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);"><?= h(substr($r['created_at'], 0, 16)) ?></td>
                     <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);"><?= h($r['platform_part_no']) ?></td>
                     <td style="font-family:'JetBrains Mono',monospace;font-size:11px;"><?= h($r['model'] ?? '-') ?></td>
@@ -436,11 +468,28 @@ require 'layout_head.php';
                     <td style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:11px;"><?= $r['qty_before'] ?></td>
                     <td style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:11px;"><?= $r['qty_after'] ?></td>
                     <td style="font-size:11px;color:var(--text2);"><?= h($r['remark']) ?></td>
+                    <td style="text-align:center;">
+                        <button type="button" class="btn btn-ghost btn-xs" onclick="undoScan(<?= (int)$r['id'] ?>, this)" title="撤销此记录" style="color:var(--red);padding:2px 6px;font-size:12px;">↩</button>
+                    </td>
                 </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
     </div>
+    <?php
+    $totalScanRows = count($recentScans);
+    $totalScanPages = ceil($totalScanRows / 10);
+    ?>
+    <?php if ($totalScanPages > 1): ?>
+    <div class="pagination" id="scanPagination" style="margin-top:10px;">
+        <button type="button" class="page-btn" id="scanPrevBtn" onclick="changeScanPage(-1)">‹</button>
+        <?php for ($p = 1; $p <= $totalScanPages; $p++): ?>
+            <a class="page-btn <?= $p === 1 ? 'active' : '' ?>" onclick="goToScanPage(<?= $p ?>)" data-scan-page="<?= $p ?>"><?= $p ?></a>
+        <?php endfor; ?>
+        <button type="button" class="page-btn" id="scanNextBtn" onclick="changeScanPage(1)">›</button>
+        <span class="page-info">共 <?= $totalScanRows ?> 条</span>
+    </div>
+    <?php endif; ?>
     <?php endif; ?>
     </div>
 </div>
@@ -449,15 +498,17 @@ require 'layout_head.php';
 <div class="card card-pad">
     <h3 style="font-size:15px;margin-bottom:10px;">使用提示</h3>
     <ul style="font-size:13px;color:var(--text2);padding-left:18px;line-height:2;">
-        <li><strong>扫码枪</strong>：首次使用请点击"连接"按钮，扫描任意条码验证连接。后续访问自动连接，无需重复操作。</li>
-        <li><strong>摄像头扫码</strong>：点击"选择"按钮选择摄像头设备，选择后点击📷按钮开启摄像头。需要 <strong>HTTPS</strong> 或 <strong>localhost</strong> 访问。</li>
-        <li><strong>连续扫码</strong>：勾选后，每次扫码自动提交并清空输入框，无需手动操作。</li>
+        <li><strong>摄像头扫码</strong>：点击📷按钮打开摄像头，对准二维码/条码自动识别。识别成功后弹出结果窗口（2秒自动关闭），期间暂停扫描，关闭后自动恢复。</li>
+        <li><strong>截图识别</strong>：若自动识别较慢，可点击"📸 截图识别"手动截取当前画面进行解码。</li>
+        <li><strong>扫码枪</strong>：首次使用请点击"连接"按钮验证。扫码枪输入后会自动提交并弹出结果。</li>
         <li><strong>快速数量</strong>：使用 − / + 按钮微调数量，或直接点击 5/10/50/100 快速设置。</li>
-        <li><strong>撤销操作</strong>：每次扫码后会显示最近操作卡片，可点击"撤销"回滚上次操作。</li>
+        <li><strong>撤销操作</strong>：在下方"最近扫描记录"中点击↩按钮可撤销对应记录，库存将回滚。</li>
         <li><strong>快捷键</strong>：F1=入库模式，F2=出库模式，F3=切换摄像头。</li>
-        <li><strong>多码匹配</strong>：依次按商品编号 → 客户料号 → 型号匹配元件。</li>
         <li>出库时库存不足将自动扣减至 0，不会出现负数。</li>
     </ul>
+    <div style="margin-top:12px;text-align:center;">
+        <a href="log.php" class="btn btn-ghost btn-sm">📋 查看全部记录</a>
+    </div>
 </div>
 
 </div>
@@ -477,18 +528,21 @@ function getAudioCtx() {
 }
 function playBeep(freq, duration, type) {
     if (!document.getElementById('soundEnabled').checked) return;
-    var ctx = getAudioCtx();
-    if (!ctx) return;
-    var osc = ctx.createOscillator();
-    var gain = ctx.createGain();
-    osc.type = type || 'sine';
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + duration);
+    try {
+        var ctx = getAudioCtx();
+        if (!ctx) return;
+        var osc = ctx.createOscillator();
+        var gain = ctx.createGain();
+        osc.type = type || 'sine';
+        osc.frequency.value = freq || 880;
+        var dur = duration || 0.1;
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + dur);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + dur);
+    } catch(e) {}
 }
 function playSuccessSound() { playBeep(880, 0.15, 'sine'); setTimeout(function(){ playBeep(1100, 0.2, 'sine'); }, 100); }
 function playErrorSound()   { playBeep(200, 0.3, 'square'); }
@@ -509,33 +563,19 @@ function vibrate(pattern) {
 }
 
 var lastScanData = null;
-function updateLastScanCard(data) {
-    lastScanData = data;
-    var card = document.getElementById('lastScanCard');
-    var content = document.getElementById('lastScanContent');
-    if (!card || !content) return;
-    var isIn = data.type === 'scan_in';
-    var typeLabel = isIn ? '📥 入库' : '📤 出库';
-    var qtyLabel = isIn ? '+' + data.qty : '-' + data.qty;
-    var color = isIn ? 'var(--green)' : 'var(--red)';
-    var stockInfo = (data.qty_after !== undefined) ? ' | 当前库存: ' + data.qty_after : '';
-    content.innerHTML = '<span style="font-family:\'JetBrains Mono\',monospace;color:var(--accent);font-weight:600;">' + (data.part_no || '') + '</span>'
-        + ' <span style="color:var(--text3);">' + (data.model || '') + '</span>'
-        + ' <span style="color:' + color + ';font-weight:700;">' + qtyLabel + '</span>'
-        + ' <span style="font-size:11px;color:var(--text3);">' + typeLabel + stockInfo + '</span>';
-    card.style.display = 'block';
-    card.style.animation = 'slideUp .3s ease';
-}
-function undoLastScan() {
-    if (!lastScanData || !lastScanData.scan_log_id) {
-        showToast('无可撤销的操作', 'warning');
+
+// 撤销指定扫码记录（从最近扫描记录列表调用）
+function undoScan(scanLogId, btn) {
+    if (!scanLogId || scanLogId <= 0) {
+        showToast('无效的记录', 'warning');
         return;
     }
-    var btn = document.getElementById('undoBtn');
+    if (!confirm('确认撤销此条扫码记录？库存将回滚。')) return;
     if (btn) { btn.disabled = true; btn.textContent = '撤销中...'; }
     var fd = new FormData();
     fd.append('action', 'scan_undo');
-    fd.append('scan_log_id', lastScanData.scan_log_id);
+    fd.append('scan_log_id', scanLogId);
+    fd.append('ajax', '1');
     fd.append('_csrf', '<?= csrf() ?>');
     fetch('action.php', { method: 'POST', body: fd })
     .then(function(r){ return r.json(); })
@@ -545,24 +585,8 @@ function undoLastScan() {
             showToast('已撤销: ' + (data.part_no || ''), 'success');
             playSuccessSound();
             vibrate(30);
-            if (lastScanData) {
-                var isIn = lastScanData.type === 'scan_in';
-                if (isIn) {
-                    var el = document.getElementById('todayInCount');
-                    el.textContent = Math.max(0, parseInt(el.textContent) - 1);
-                    var el2 = document.getElementById('todayInQty');
-                    el2.textContent = Math.max(0, parseInt(el2.textContent) - lastScanData.qty);
-                } else {
-                    var el = document.getElementById('todayOutCount');
-                    el.textContent = Math.max(0, parseInt(el.textContent) - 1);
-                    var el2 = document.getElementById('todayOutQty');
-                    el2.textContent = Math.max(0, parseInt(el2.textContent) - lastScanData.qty);
-                }
-            }
-            var card = document.getElementById('lastScanCard');
-            if (card) card.style.display = 'none';
-            lastScanData = null;
-            setTimeout(function(){ window.location.reload(); }, 1000);
+            // 刷新页面以更新记录列表和统计
+            setTimeout(function(){ window.location.reload(); }, 600);
         } else {
             showToast('撤销失败: ' + (data.error || '未知错误'), 'error');
             playErrorSound();
@@ -570,7 +594,7 @@ function undoLastScan() {
     })
     .catch(function(err){
         if (btn) { btn.disabled = false; btn.textContent = '↩ 撤销'; }
-        showToast('网络错误', 'error');
+        showToast('网络错误，请重试', 'error');
     });
 }
 
@@ -801,11 +825,23 @@ function showCameraSelector() {
     title.textContent = '📷 选择摄像头';
     footer.style.display = 'flex';
 
-    var html = '<p class="device-modal-desc">请选择要使用的摄像头设备：</p><div class="device-list">';
-    videoDevices.forEach(function(device, idx) {
-        var label = device.label || '摄像头 ' + (idx + 1);
-        var icon = getDeviceIcon(label);
-        // 授权后 deviceId 应该是真实的，但作为后备用索引标识
+    // 排序：后置摄像头排在前面，方便移动端用户选择
+    var sorted = videoDevices.slice().sort(function(a, b) {
+        var aRear = isRearCamera(a), bRear = isRearCamera(b);
+        if (aRear && !bRear) return -1;
+        if (!aRear && bRear) return 1;
+        var aFront = isFrontCamera(a), bFront = isFrontCamera(b);
+        if (aFront && !bFront) return 1;
+        if (!aFront && bFront) return -1;
+        return 0;
+    });
+
+    var html = '<p class="device-modal-desc">请选择要使用的摄像头设备（后置摄像头推荐）：</p><div class="device-list">';
+    sorted.forEach(function(device, idx) {
+        var rawLabel = device.label || ('摄像头 ' + (idx + 1));
+        var icon = isRearCamera(device) ? '🔄' : (isFrontCamera(device) ? '📱' : getDeviceIcon(rawLabel));
+        var labelSuffix = isRearCamera(device) ? ' (后置)' : (isFrontCamera(device) ? ' (前置)' : '');
+        var label = rawLabel + labelSuffix;
         var devId = device.deviceId || ('idx_' + idx);
         var isSelected = devId === selectedCameraId;
         var idDisplay = device.deviceId ? device.deviceId.substring(0, 16) + '...' : '设备 #' + (idx + 1);
@@ -896,6 +932,33 @@ function getDeviceIcon(label) {
     return '📹';
 }
 
+// 判断是否为后置摄像头（移动端）
+function isRearCamera(device) {
+    var l = ((device && device.label) || '').toLowerCase();
+    return l.indexOf('back') >= 0 || l.indexOf('rear') >= 0 || l.indexOf('environment') >= 0 || l.indexOf('后置') >= 0 || l.indexOf('后摄') >= 0;
+}
+
+// 判断是否为前置摄像头（移动端）
+function isFrontCamera(device) {
+    var l = ((device && device.label) || '').toLowerCase();
+    return l.indexOf('front') >= 0 || l.indexOf('user') >= 0 || l.indexOf('facing') >= 0 || l.indexOf('前置') >= 0 || l.indexOf('前摄') >= 0;
+}
+
+// 从设备列表中优先选择后置摄像头
+function pickRearCamera(devices) {
+    if (!devices || devices.length === 0) return null;
+    // 1. 优先匹配标签含 back/rear/environment 的
+    for (var i = 0; i < devices.length; i++) {
+        if (isRearCamera(devices[i])) return devices[i];
+    }
+    // 2. 排除前置摄像头，取第一个非前置的
+    for (var j = 0; j < devices.length; j++) {
+        if (!isFrontCamera(devices[j])) return devices[j];
+    }
+    // 3. 兜底取最后一个（移动端后置通常排在后面）
+    return devices[devices.length - 1];
+}
+
 // ═══════════════════════════════════════════════════════════
 // 摄像头开关
 // ═══════════════════════════════════════════════════════════
@@ -907,13 +970,19 @@ function toggleCamera() {
     if (cameraActive || cameraStarting) {
         stopCamera();
     } else {
-        // 如果未选择设备，先选择
-        if (!selectedCameraId || videoDevices.length === 0) {
+        // 如果未选择设备，直接启动（startCamera 会通过 facingMode:environment 自动选择后置摄像头）
+        // 仅在桌面端有多个设备且无法自动判断时才弹出选择框
+        if (!selectedCameraId && videoDevices.length > 1 && !isMobile()) {
             selectCamera();
             return;
         }
         startCamera();
     }
+}
+
+// 判断是否为移动端
+function isMobile() {
+    return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(navigator.userAgent) || window.innerWidth <= 768;
 }
 
 function startCamera() {
@@ -947,8 +1016,8 @@ function startCamera() {
         }
     }, 15000);
 
-    // 构建权限请求约束：优先使用已选设备，否则用默认摄像头
-    var constraints = { video: true };
+    // 构建权限请求约束：优先使用已选设备，否则优先请求后置摄像头（移动端）
+    var constraints = { video: { facingMode: { ideal: 'environment' } } };
     if (selectedCameraId && selectedCameraId.indexOf('idx_') !== 0) {
         constraints.video = { deviceId: { exact: selectedCameraId } };
     }
@@ -968,34 +1037,45 @@ function startCamera() {
         }
         // 用真实 deviceId 更新 selectedCameraId
         if (!selectedCameraId || selectedCameraId.indexOf('idx_') === 0) {
-            selectedCameraId = videoDevices[0].deviceId;
+            // 自动选择：移动端优先后置摄像头
+            var rear = pickRearCamera(videoDevices);
+            selectedCameraId = (rear && rear.deviceId) ? rear.deviceId : videoDevices[0].deviceId;
         } else {
             // 验证已选设备是否还存在
             var found = videoDevices.find(function(d) { return d.deviceId === selectedCameraId; });
-            if (!found) selectedCameraId = videoDevices[0].deviceId;
+            if (!found) {
+                var rear2 = pickRearCamera(videoDevices);
+                selectedCameraId = (rear2 && rear2.deviceId) ? rear2.deviceId : videoDevices[0].deviceId;
+            }
         }
 
-        // 第3步：清空并重建 html5QrCode 实例
+        // 第3步：清空并重建 html5QrCode 实例（不添加自定义覆盖层，使用库自带扫描框）
         document.getElementById('cameraView').innerHTML = '';
         html5QrCode = new Html5Qrcode("cameraView");
 
         var config = {
             fps: 10,
-            qrbox: { width: 250, height: 150 },
-            aspectRatio: 1.333,
+            qrbox: function(viewfinderWidth, viewfinderHeight) {
+                // 扫描区域取视频较短边的 80%（更大区域更易识别QR码）
+                var minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+                var boxSize = Math.floor(minEdge * 0.8);
+                if (boxSize < 150) boxSize = 150;
+                return { width: boxSize, height: boxSize };
+            },
             formatsToSupport: [
+                Html5QrcodeSupportedFormats.QR_CODE,
                 Html5QrcodeSupportedFormats.CODE_128,
                 Html5QrcodeSupportedFormats.CODE_39,
-                Html5QrcodeSupportedFormats.EAN_8,
                 Html5QrcodeSupportedFormats.EAN_13,
-                Html5QrcodeSupportedFormats.UPC_A,
-                Html5QrcodeSupportedFormats.UPC_E,
-                Html5QrcodeSupportedFormats.QR_CODE,
                 Html5QrcodeSupportedFormats.DATA_MATRIX,
             ],
+            experimentalFeatures: {
+                useBarCodeDetectorIfSupported: true
+            },
         };
 
-        // 第4步：用真实 deviceId 启动扫码（此时权限已授予，不会再次弹窗）
+        // 第4步：用真实 deviceId 启动扫码
+        // 注意：不传 videoConstraints，避免与 deviceId 冲突导致扫描失效
         return html5QrCode.start(selectedCameraId, config, onScanSuccess, onScanFailure);
     }).then(function() {
         clearTimeout(timeoutId);
@@ -1007,8 +1087,14 @@ function startCamera() {
         dot.classList.remove('pulse');
         text.textContent = '摄像头工作中';
         text.style.color = 'var(--green)';
-        document.getElementById('scanCamBtn').classList.add('active');
         document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
+        var camBtn = document.getElementById('scanCamBtn');
+        if (camBtn) camBtn.classList.add('active');
+        // 显示手动截图识别按钮（作为自动识别的补充）
+        var captureBtn = document.getElementById('captureBtn');
+        if (captureBtn) captureBtn.style.display = '';
+        // 检测是否支持闪光灯（torch）
+        checkTorchSupport();
     }).catch(function(err) {
         clearTimeout(timeoutId);
         cameraStarting = false;
@@ -1034,7 +1120,6 @@ function startCamera() {
         dot.className = 'dot off';
         dot.classList.remove('pulse');
         cameraSection.classList.remove('open');
-        document.getElementById('scanCamBtn').classList.remove('active');
         document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
         showToast(msg, 'error');
     });
@@ -1049,8 +1134,14 @@ function forceStopCamera() {
     cameraStarting = false;
     document.getElementById('cameraView').innerHTML = '';
     document.getElementById('cameraSection').classList.remove('open');
-    document.getElementById('scanCamBtn').classList.remove('active');
     document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
+    var camBtn = document.getElementById('scanCamBtn');
+    if (camBtn) camBtn.classList.remove('active');
+    // 隐藏截图识别按钮和闪光灯按钮
+    var captureBtn = document.getElementById('captureBtn');
+    if (captureBtn) captureBtn.style.display = 'none';
+    var torchBtn = document.getElementById('torchBtn');
+    if (torchBtn) torchBtn.style.display = 'none';
     var dot = document.getElementById('cameraDot');
     dot.className = 'dot off';
     dot.classList.remove('pulse');
@@ -1065,6 +1156,46 @@ function forceStopCamera() {
     }
 }
 
+// ── 闪光灯（torch）支持 ──
+var torchEnabled = false;
+var torchTrack = null;
+
+function checkTorchSupport() {
+    var torchBtn = document.getElementById('torchBtn');
+    if (!torchBtn || !html5QrCode) return;
+    try {
+        // 通过 html5QrCode 内部的 video element 获取 stream
+        var videoEl = document.querySelector('#cameraView video');
+        if (videoEl && videoEl.srcObject) {
+            var tracks = videoEl.srcObject.getVideoTracks();
+            if (tracks.length > 0) {
+                torchTrack = tracks[0];
+                var caps = torchTrack.getCapabilities ? torchTrack.getCapabilities() : {};
+                if (caps && caps.torch) {
+                    torchBtn.style.display = '';
+                    torchEnabled = false;
+                    torchBtn.textContent = '🔦 闪光灯';
+                } else {
+                    torchBtn.style.display = 'none';
+                }
+                return;
+            }
+        }
+    } catch(e) {}
+    torchBtn.style.display = 'none';
+}
+
+function toggleTorch() {
+    if (!torchTrack) return;
+    try {
+        torchEnabled = !torchEnabled;
+        torchTrack.applyConstraints({ advanced: [{ torch: torchEnabled }] });
+        document.getElementById('torchBtn').textContent = torchEnabled ? '🔦 关闭闪光' : '🔦 闪光灯';
+    } catch(e) {
+        showToast('闪光灯切换失败', 'error');
+    }
+}
+
 function stopCamera() {
     forceStopCamera();
 }
@@ -1072,19 +1203,154 @@ function stopCamera() {
 function onScanSuccess(decodedText, decodedResult) {
     var input = document.getElementById('barcodeInput');
     var cameraView = document.getElementById('cameraView');
-    input.value = decodedText;
-    input.focus();
+
+    // 使用解码算法提取信息
+    var result = ScanDecoder.decode(decodedText);
+
+    // 闪光反馈
     cameraView.classList.add('camera-flash');
     setTimeout(function() { cameraView.classList.remove('camera-flash'); }, 300);
-    stopCamera();
-    setTimeout(function() {
-        if (input.value.trim() !== '') {
-            doScan();
+    playBeep(880, 0.1, 'sine');
+
+    if (ScanDecoder.isValidPartNo(result.partNo)) {
+        // 如果是立创二维码，自动切换入库模式并填充数据
+        if (result.autoAction === 'scan_in') {
+            setScanType('scan_in');
+            setQty(result.qty);
+            document.getElementById('scanOrderNo').value = result.orderNo;
+            document.getElementById('scanSource').value = 'lcsc_qr';
+        } else if (result.type === 'system_qr' && result.qty > 1) {
+            setQty(result.qty);
+            document.getElementById('scanOrderNo').value = '';
+            document.getElementById('scanSource').value = 'system_qr';
+        } else {
+            document.getElementById('scanOrderNo').value = '';
+            document.getElementById('scanSource').value = result.type;
         }
-    }, 400);
+        // 设置输入框的编号
+        input.value = result.partNo;
+
+        // 暂停摄像头扫描（防止弹窗期间重复识别）
+        pauseCameraScanning();
+
+        // 提交扫码
+        setTimeout(function() {
+            if (input.value.trim() !== '') {
+                doScan();
+            }
+        }, 200);
+    } else {
+        input.value = decodedText;
+        showToast('⚠ 识别到内容但无法解析为编号: ' + decodedText.substring(0, 50), 'warning');
+    }
 }
 
-function onScanFailure(error) {}
+// ── 暂停/恢复摄像头扫描（弹窗期间暂停，关闭后恢复） ──
+function pauseCameraScanning() {
+    if (cameraActive && html5QrCode) {
+        try { html5QrCode.pause(); } catch(e) {}
+    }
+}
+function resumeCameraScanning() {
+    if (cameraActive && html5QrCode) {
+        try { html5QrCode.resume(); } catch(e) {}
+    }
+}
+
+function onScanFailure(error) {
+    // 每帧未识别到条码时的回调，无需处理
+}
+
+// ── 手动截图识别 ──
+// 从视频流截取当前帧，使用 html5-qrcode 的 scanFile 方法解码
+// 作为自动识别失败时的补充手段（类似其他扫码应用的"对焦后截图"）
+var captureScanning = false;
+function captureAndScan() {
+    if (captureScanning) return;
+    if (!cameraActive || !html5QrCode) {
+        showToast('摄像头未启动', 'error');
+        return;
+    }
+    var videoEl = document.querySelector('#cameraView video');
+    if (!videoEl || !videoEl.videoWidth) {
+        showToast('视频流未就绪，请稍候', 'warning');
+        return;
+    }
+
+    captureScanning = true;
+    var captureBtn = document.getElementById('captureBtn');
+    var originalText = captureBtn.textContent;
+    captureBtn.textContent = '⏳ 识别中...';
+    captureBtn.disabled = true;
+
+    try {
+        // 截取当前视频帧到 canvas
+        var canvas = document.createElement('canvas');
+        canvas.width = videoEl.videoWidth;
+        canvas.height = videoEl.videoHeight;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+        // 转为 Blob 再转 File（scanFile 需要 File 对象）
+        canvas.toBlob(function(blob) {
+            if (!blob) {
+                captureScanning = false;
+                captureBtn.textContent = originalText;
+                captureBtn.disabled = false;
+                showToast('截图失败', 'error');
+                return;
+            }
+            var imageFile = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
+
+            // 创建隐藏的临时 div 用于 scanFile（避免与正在运行的实例冲突）
+            var tempDiv = document.createElement('div');
+            tempDiv.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;';
+            tempDiv.id = 'tempScanDiv_' + Date.now();
+            document.body.appendChild(tempDiv);
+
+            var tempScanner = new Html5Qrcode(tempDiv.id);
+            // scanFile 第二个参数 showImage=false，不渲染图片到容器
+            tempScanner.scanFile(imageFile, false).then(function(decodedText) {
+                captureScanning = false;
+                captureBtn.textContent = originalText;
+                captureBtn.disabled = false;
+                try { tempScanner.clear(); } catch(e) {}
+                try { document.body.removeChild(tempDiv); } catch(e) {}
+                // 调用标准成功处理
+                onScanSuccess(decodedText, null);
+            }).catch(function(err) {
+                captureScanning = false;
+                captureBtn.textContent = originalText;
+                captureBtn.disabled = false;
+                try { tempScanner.clear(); } catch(e) {}
+                try { document.body.removeChild(tempDiv); } catch(e) {}
+                showToast('⚠ 截图未识别到二维码，请调整角度/距离后重试', 'warning');
+            });
+        }, 'image/jpeg', 0.92);
+    } catch(e) {
+        captureScanning = false;
+        captureBtn.textContent = originalText;
+        captureBtn.disabled = false;
+        showToast('截图识别失败: ' + (e.message || e), 'error');
+    }
+}
+
+// ── 防重复扫描 ──
+var recentScans = []; // {key, time}
+var DUPLICATE_WINDOW = 5000; // 5秒内相同码视为重复
+
+function checkDuplicate(barcode, orderNo) {
+    var key = orderNo ? (orderNo + ':' + barcode) : barcode;
+    var now = Date.now();
+    // 清理过期记录
+    recentScans = recentScans.filter(function(item) { return now - item.time < DUPLICATE_WINDOW; });
+    // 检查是否重复
+    for (var i = 0; i < recentScans.length; i++) {
+        if (recentScans[i].key === key) return true;
+    }
+    recentScans.push({ key: key, time: now });
+    return false;
+}
 
 // ═══════════════════════════════════════════════════════════
 // 切换扫码类型
@@ -1100,9 +1366,6 @@ function setScanType(type) {
         pillIn.classList.add('active');
         pillOut.classList.remove('active');
     }
-    var input = document.getElementById('barcodeInput');
-    input.value = '';
-    input.focus();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1112,9 +1375,16 @@ function doScan() {
     var input = document.getElementById('barcodeInput');
     var barcode = input.value.trim();
     if (barcode === '') return;
+
+    // 防重复扫描
+    var orderNo = document.getElementById('scanOrderNo').value;
+    if (checkDuplicate(barcode, orderNo)) {
+        showScanResultModal({ ok: false, error: '重复扫描，已忽略（5秒内同一码只处理一次）' });
+        return;
+    }
+
     var form = document.getElementById('scanForm');
     var formData = new FormData(form);
-    input.disabled = true;
 
     fetch('action.php', {
         method: 'POST',
@@ -1122,72 +1392,86 @@ function doScan() {
     })
     .then(function(r){ return r.json(); })
     .then(function(data){
-        input.disabled = false;
         if (data.ok) {
-            var isIn = data.type === 'scan_in';
-            var typeLabel = isIn ? '入库' : '出库';
-            var qtyLabel = isIn ? '+' + data.qty : '-' + data.qty;
-            var stockInfo = (data.qty_after !== undefined) ? ' | 库存:' + data.qty_after : '';
-            showToast(typeLabel + '成功: ' + data.part_no + ' (' + data.model + ') ' + qtyLabel + stockInfo, 'success');
             playSuccessSound();
             vibrate(30);
-            input.classList.add('scan-flash');
-            setTimeout(function(){ input.classList.remove('scan-flash'); }, 400);
-            updateLastScanCard(data);
+            // 更新今日统计
+            var isIn = data.type === 'scan_in';
             if (isIn) {
                 var el = document.getElementById('todayInCount');
                 el.textContent = parseInt(el.textContent) + 1;
                 var el2 = document.getElementById('todayInQty');
                 el2.textContent = parseInt(el2.textContent) + data.qty;
             } else {
-                var el = document.getElementById('todayOutCount');
-                el.textContent = parseInt(el.textContent) + 1;
-                var el2 = document.getElementById('todayOutQty');
-                el2.textContent = parseInt(el2.textContent) + data.qty;
-            }
-            if (document.getElementById('continuousMode').checked) {
-                input.value = '';
-                document.getElementById('scanQty').value = 1;
-                input.focus();
+                var el3 = document.getElementById('todayOutCount');
+                el3.textContent = parseInt(el3.textContent) + 1;
+                var el4 = document.getElementById('todayOutQty');
+                el4.textContent = parseInt(el4.textContent) + data.qty;
             }
         } else {
-            showToast('失败: ' + (data.error || '未知错误'), 'error');
             playErrorSound();
             vibrate([100, 50, 100]);
-            input.classList.add('scan-flash-err');
-            setTimeout(function(){ input.classList.remove('scan-flash-err'); }, 400);
-            if (document.getElementById('continuousMode').checked) {
-                input.value = '';
-                input.focus();
-            }
         }
+        // 显示结果弹窗
+        showScanResultModal(data);
     })
     .catch(function(err){
-        input.disabled = false;
-        showToast('网络错误，请重试', 'error');
         playErrorSound();
         vibrate([100, 50, 100]);
-        if (document.getElementById('continuousMode').checked) {
-            input.value = '';
-            input.focus();
-        }
+        showScanResultModal({ ok: false, error: '网络错误，请重试' });
     });
 }
 
-// ═══════════════════════════════════════════════════════════
-// 表单提交拦截
-// ═══════════════════════════════════════════════════════════
-document.getElementById('scanForm').addEventListener('submit', function(e) {
-    var barcode = document.getElementById('barcodeInput').value.trim();
-    if (barcode === '') { e.preventDefault(); return; }
-    if (document.getElementById('continuousMode').checked) {
-        e.preventDefault();
-        doScan();
+// ── 扫码结果弹窗 ──
+var lastScanData = null;
+function showScanResultModal(data) {
+    lastScanData = data;
+    var modal = document.getElementById('scanResultModal');
+    var title = document.getElementById('scanResultTitle');
+    var body = document.getElementById('scanResultBody');
+
+    if (data.ok) {
+        var isIn = data.type === 'scan_in';
+        var typeLabel = isIn ? '📥 扫码入库成功' : '📤 扫码出库成功';
+        var qtyLabel = isIn ? '+' + data.qty : '-' + data.qty;
+        var qtyColor = isIn ? 'var(--green)' : 'var(--red)';
+        title.textContent = typeLabel;
+        title.style.color = qtyColor;
+        body.innerHTML =
+            '<table class="info-table" style="font-size:14px;width:100%;">' +
+            '<tr><td style="color:var(--text2);padding:6px 0;">商品编号</td><td style="font-family:\'JetBrains Mono\',monospace;color:var(--accent);font-weight:600;padding:6px 0;">' + (data.part_no || '') + '</td></tr>' +
+            '<tr><td style="color:var(--text2);padding:6px 0;">型号</td><td style="font-family:\'JetBrains Mono\',monospace;padding:6px 0;">' + (data.model || '-') + '</td></tr>' +
+            '<tr><td style="color:var(--text2);padding:6px 0;">数量变化</td><td style="font-family:\'JetBrains Mono\',monospace;font-weight:700;color:' + qtyColor + ';padding:6px 0;">' + qtyLabel + '</td></tr>' +
+            '<tr><td style="color:var(--text2);padding:6px 0;">变化前</td><td style="font-family:\'JetBrains Mono\',monospace;padding:6px 0;">' + (data.qty_before !== undefined ? data.qty_before : '-') + '</td></tr>' +
+            '<tr><td style="color:var(--text2);padding:6px 0;">变化后</td><td style="font-family:\'JetBrains Mono\',monospace;font-weight:600;padding:6px 0;">' + (data.qty_after !== undefined ? data.qty_after : '-') + '</td></tr>' +
+            '</table>';
+    } else {
+        title.textContent = '⚠ 扫码失败';
+        title.style.color = 'var(--red)';
+        body.innerHTML = '<div style="font-size:14px;color:var(--text2);padding:12px 0;text-align:center;">' + (data.error || '未知错误') + '</div>';
     }
-});
+    modal.style.display = 'flex';
+    // 自动关闭：成功2秒，失败3秒
+    var delay = data.ok ? 2000 : 3000;
+    clearTimeout(window._scanModalTimer);
+    window._scanModalTimer = setTimeout(closeScanResultModal, delay);
+}
+
+function closeScanResultModal() {
+    clearTimeout(window._scanModalTimer);
+    document.getElementById('scanResultModal').style.display = 'none';
+    // 清空输入框，准备下一次扫描
+    var input = document.getElementById('barcodeInput');
+    input.value = '';
+    document.getElementById('scanQty').value = 1;
+    document.getElementById('scanOrderNo').value = '';
+    document.getElementById('scanSource').value = '';
+    // 恢复摄像头扫描
+    resumeCameraScanning();
+}
 
 // ═══════════════════════════════════════════════════════════
-// 输入框事件（回车提交 + 扫码枪验证）
+// 隐藏输入框事件（扫码枪回车提交 + 验证）
 // ═══════════════════════════════════════════════════════════
 document.getElementById('barcodeInput').addEventListener('keydown', function(e) {
     // 扫码枪验证模式：任何按键输入都算验证成功
@@ -1201,6 +1485,24 @@ document.getElementById('barcodeInput').addEventListener('keydown', function(e) 
         if (val !== '') {
             if (scannerVerifyListening) {
                 onScannerVerifyInput();
+            }
+            // 使用解码器智能识别码类型
+            var decoded = ScanDecoder.decode(val);
+            if (ScanDecoder.isValidPartNo(decoded.partNo)) {
+                if (decoded.autoAction === 'scan_in') {
+                    setScanType('scan_in');
+                    setQty(decoded.qty);
+                    document.getElementById('scanOrderNo').value = decoded.orderNo;
+                    document.getElementById('scanSource').value = 'lcsc_qr';
+                } else if (decoded.type === 'system_qr') {
+                    if (decoded.qty > 1) setQty(decoded.qty);
+                    document.getElementById('scanOrderNo').value = '';
+                    document.getElementById('scanSource').value = 'system_qr';
+                } else {
+                    document.getElementById('scanOrderNo').value = '';
+                    document.getElementById('scanSource').value = decoded.type;
+                }
+                this.value = decoded.partNo;
             }
             doScan();
         }
@@ -1225,14 +1527,20 @@ document.addEventListener('keydown', function(e) {
 
     var input = document.getElementById('barcodeInput');
     input.value = '';
-    input.focus();
 
-    // 点击空白区域重新聚焦
+    // 扫码枪需要输入框保持焦点
     document.addEventListener('click', function(e) {
         if (cameraActive) return;
         var tag = e.target.tagName;
         if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'BUTTON' && tag !== 'TEXTAREA' && tag !== 'LABEL') {
             input.focus();
+        }
+    });
+
+    // 弹窗点击遮罩可手动关闭（也会自动关闭）
+    document.getElementById('scanResultModal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            closeScanResultModal();
         }
     });
 
@@ -1244,7 +1552,53 @@ document.addEventListener('keydown', function(e) {
         if (scannerVerifyTimer) clearInterval(scannerVerifyTimer);
         if (toastTimer) clearTimeout(toastTimer);
     });
+
+    // 初始化扫描记录翻页
+    initScanPagination();
 })();
+
+// ═══════════════════════════════════════════════════════════
+// 最近扫描记录翻页（仅影响记录列表，不影响上方扫码功能）
+// ═══════════════════════════════════════════════════════════
+var currentScanPage = 1;
+function initScanPagination() {
+    var rows = document.querySelectorAll('.scan-row');
+    if (rows.length === 0) return;
+    showScanPage(1);
+}
+
+function showScanPage(page) {
+    var rows = document.querySelectorAll('.scan-row');
+    var totalRows = rows.length;
+    var totalPages = Math.ceil(totalRows / 10);
+    if (page < 1) page = 1;
+    if (page > totalPages) page = totalPages;
+    currentScanPage = page;
+
+    for (var i = 0; i < rows.length; i++) {
+        var rowPage = parseInt(rows[i].getAttribute('data-page'));
+        rows[i].style.display = (rowPage === page) ? '' : 'none';
+    }
+
+    // 更新分页按钮状态
+    var pageBtns = document.querySelectorAll('#scanPagination [data-scan-page]');
+    for (var j = 0; j < pageBtns.length; j++) {
+        pageBtns[j].classList.toggle('active', parseInt(pageBtns[j].getAttribute('data-scan-page')) === page);
+    }
+
+    var prevBtn = document.getElementById('scanPrevBtn');
+    var nextBtn = document.getElementById('scanNextBtn');
+    if (prevBtn) prevBtn.classList.toggle('disabled', page <= 1);
+    if (nextBtn) nextBtn.classList.toggle('disabled', page >= totalPages);
+}
+
+function goToScanPage(page) {
+    showScanPage(page);
+}
+
+function changeScanPage(delta) {
+    showScanPage(currentScanPage + delta);
+}
 </script>
 
 </body></html>

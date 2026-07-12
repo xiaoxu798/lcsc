@@ -70,7 +70,9 @@ $allCats->execute([$dataUid]); $allCats = $allCats->fetchAll();
 $ncStmt = $db->prepare("SELECT COUNT(DISTINCT p.id) FROM parts p LEFT JOIN part_categories pc2 ON pc2.part_id=p.id WHERE p.user_id=? AND pc2.part_id IS NULL");
 $ncStmt->execute([$dataUid]); $noCatCount = (int)$ncStmt->fetchColumn();
 
-$allPlats = $db->query("SELECT id,name,url_template,is_default FROM platforms ORDER BY id")->fetchAll();
+$platStmt = $db->prepare("SELECT id,name,url_template,is_default FROM platforms WHERE user_id=? ORDER BY id");
+$platStmt->execute([$dataUid]);
+$allPlats = $platStmt->fetchAll();
 
 // 公告
 $noticeContent = getSetting('notice_content','');

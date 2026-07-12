@@ -59,7 +59,7 @@ if ($type === 'log_csv') {
     $logs->execute([$dataUid]);
     $logs = $logs->fetchAll();
 
-    $typeNames = ['import'=>'订单导入','manual_in'=>'手动入库','manual_out'=>'手动出库','adjust'=>'库存调整','scan_in'=>'扫码入库','scan_out'=>'扫码出库','damaged'=>'报损','repair'=>'修复','scan_undo_in'=>'撤销扫码入库','scan_undo_out'=>'撤销扫码出库'];
+    $typeNames = ['import'=>'订单导入','manual_in'=>'手动入库','manual_out'=>'手动出库','adjust'=>'库存调整','scan_in'=>'扫码入库','scan_out'=>'扫码出库','damaged'=>'报损','repair'=>'修复','scan_undo_in'=>'撤销扫码入库','scan_undo_out'=>'撤销扫码出库','bom_out'=>'BOM出库'];
 
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="stock_log_'.date('Ymd_His').'.csv"');

@@ -163,16 +163,27 @@ try {
 
         // ==================== 扫码入库（所有用户）====================
         case 'scan_in':
-            $barcode = safeStr($_POST['barcode'] ?? '');
-            $platId  = safeInt($_POST['platform_id'] ?? 0);
-            $qty     = max(1, safeInt($_POST['qty'] ?? 1));
-            $isAjax  = ($_POST['ajax'] ?? '') === '1';
+            $barcode  = safeStr($_POST['barcode'] ?? '');
+            $platId   = safeInt($_POST['platform_id'] ?? 0);
+            $qty      = max(1, safeInt($_POST['qty'] ?? 1));
+            $orderNo  = safeStr($_POST['order_no'] ?? '');
+            $isAjax   = ($_POST['ajax'] ?? '') === '1';
             if ($barcode === '') {
                 if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'条码不能为空'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
                 $_SESSION['scan_error'] = '条码不能为空';
                 redirect('scan.php');
             }
-            // 多字段匹配：优先按平台+编号查，其次按客户料号查，最后模糊匹配型号
+            // 服务端防重复：同一订单号+编号在5分钟内不可重复入库
+            if ($orderNo !== '') {
+                $dupCheck = $db->prepare("SELECT id FROM scan_log WHERE user_id=? AND platform_part_no=? AND remark LIKE ? AND created_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE) LIMIT 1");
+                $dupCheck->execute([$uid, $barcode, '%'.$orderNo.'%']);
+                if ($dupCheck->fetch()) {
+                    if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'该二维码5分钟内已扫描过，请勿重复操作'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
+                    $_SESSION['scan_error'] = '该二维码5分钟内已扫描过';
+                    redirect('scan.php');
+                }
+            }
+            // 多字段匹配
             $part = null;
             if ($platId > 0) {
                 $stmt = $db->prepare("SELECT * FROM parts WHERE platform_part_no=? AND platform_id=? AND user_id=?");
@@ -198,12 +209,12 @@ try {
             $after  = $before + $qty;
             $db->prepare("UPDATE parts SET stock=? WHERE id=? AND user_id=?")
                ->execute([$after, $part['id'], $dataUid]);
-            // 写入 stock_log
+            // 备注包含订单号（如有）
+            $remark = $orderNo !== '' ? '扫码入库 订单:'.$orderNo : '扫码入库';
             $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
-               ->execute([$uid, $part['id'], $barcode, 'scan_in', $qty, $before, $after, '扫码入库']);
-            // 写入 scan_log
+               ->execute([$uid, $part['id'], $barcode, 'scan_in', $qty, $before, $after, $remark]);
             $db->prepare("INSERT INTO scan_log (user_id,part_id,platform_part_no,scan_type,qty,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
-               ->execute([$uid, $part['id'], $barcode, 'in', $qty, $before, $after, '扫码入库']);
+               ->execute([$uid, $part['id'], $barcode, 'in', $qty, $before, $after, $remark]);
             $scanLogId = (int)$db->lastInsertId();
             // AJAX 模式返回 JSON
             if ($isAjax) {
@@ -240,11 +251,22 @@ try {
             $barcode = safeStr($_POST['barcode'] ?? '');
             $platId  = safeInt($_POST['platform_id'] ?? 0);
             $qty     = max(1, safeInt($_POST['qty'] ?? 1));
+            $orderNo = safeStr($_POST['order_no'] ?? '');
             $isAjax  = ($_POST['ajax'] ?? '') === '1';
             if ($barcode === '') {
                 if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'条码不能为空'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
                 $_SESSION['scan_error'] = '条码不能为空';
                 redirect('scan.php');
+            }
+            // 服务端防重复：同一订单号+编号在5分钟内不可重复出库
+            if ($orderNo !== '') {
+                $dupCheck = $db->prepare("SELECT id FROM scan_log WHERE user_id=? AND platform_part_no=? AND scan_type='out' AND remark LIKE ? AND created_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE) LIMIT 1");
+                $dupCheck->execute([$uid, $barcode, '%'.$orderNo.'%']);
+                if ($dupCheck->fetch()) {
+                    if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'该二维码5分钟内已扫描过，请勿重复操作'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
+                    $_SESSION['scan_error'] = '该二维码5分钟内已扫描过';
+                    redirect('scan.php');
+                }
             }
             // 多字段匹配：优先按平台+编号查，其次按客户料号查
             $part = null;
@@ -271,14 +293,21 @@ try {
             $before = (int)$part['stock'];
             $after  = max(0, $before - $qty);
             $actual = $before - $after; // 实际出库数量
+            if ($actual <= 0) {
+                if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'库存不足，无法出库'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
+                $_SESSION['scan_error'] = '库存不足，无法出库';
+                redirect('scan.php');
+            }
             $db->prepare("UPDATE parts SET stock=? WHERE id=? AND user_id=?")
                ->execute([$after, $part['id'], $dataUid]);
+            // 备注包含订单号（如有）
+            $remark = $orderNo !== '' ? '扫码出库 订单:'.$orderNo : '扫码出库';
             // 写入 stock_log
             $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
-               ->execute([$uid, $part['id'], $barcode, 'scan_out', -$actual, $before, $after, '扫码出库']);
+               ->execute([$uid, $part['id'], $barcode, 'scan_out', -$actual, $before, $after, $remark]);
             // 写入 scan_log
             $db->prepare("INSERT INTO scan_log (user_id,part_id,platform_part_no,scan_type,qty,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
-               ->execute([$uid, $part['id'], $barcode, 'out', $actual, $before, $after, '扫码出库']);
+               ->execute([$uid, $part['id'], $barcode, 'out', $actual, $before, $after, $remark]);
             $scanLogId = (int)$db->lastInsertId();
             // AJAX 模式返回 JSON
             if ($isAjax) {
@@ -410,6 +439,36 @@ try {
                 exit;
             }
             redirect('scan.php?flash=ok');
+
+        // ==================== 删除出入库记录 ====================
+        case 'delete_log':
+            $logId = intval($_POST['log_id'] ?? 0);
+            if ($logId > 0) {
+                // 验证记录属于当前用户（通过 parts 表关联验证）
+                $check = $db->prepare("SELECT l.id FROM stock_log l INNER JOIN parts p ON p.id=l.part_id WHERE l.id=? AND p.user_id=?");
+                $check->execute([$logId, $dataUid]);
+                if ($check->fetch()) {
+                    $db->prepare("DELETE FROM stock_log WHERE id=?")->execute([$logId]);
+                    adminLog($uid, '删除出入库记录', "log_id:{$logId}");
+                }
+            }
+            redirect('log.php?flash=ok');
+
+        // ==================== 批量删除出入库记录 ====================
+        case 'batch_delete_logs':
+            $logIds = array_map('intval', $_POST['log_ids'] ?? []);
+            if (!empty($logIds)) {
+                $in = implode(',', array_fill(0, count($logIds), '?'));
+                $valid = $db->prepare("SELECT l.id FROM stock_log l INNER JOIN parts p ON p.id=l.part_id WHERE l.id IN ($in) AND p.user_id=?");
+                $valid->execute([...$logIds, $dataUid]);
+                $validIds = array_column($valid->fetchAll(), 'id');
+                if (!empty($validIds)) {
+                    $inV = implode(',', array_fill(0, count($validIds), '?'));
+                    $db->prepare("DELETE FROM stock_log WHERE id IN ($inV)")->execute($validIds);
+                    adminLog($uid, '批量删除出入库记录', 'count:' . count($validIds));
+                }
+            }
+            redirect('log.php?flash=ok');
 
         default:
             redirect('index.php');
