@@ -397,6 +397,11 @@ try {
                 if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'记录不存在或无权操作'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
                 redirect('scan.php');
             }
+            // 防止重复撤销：检查是否已撤销
+            if (strpos($scan['remark'] ?? '', '[已撤销]') !== false) {
+                if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'该记录已撤销，不可重复操作'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); exit; }
+                redirect('scan.php');
+            }
             // 查找元件
             $part = $db->prepare("SELECT * FROM parts WHERE id=? AND user_id=?");
             $part->execute([$scan['part_id'], $dataUid]);

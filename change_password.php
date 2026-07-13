@@ -70,7 +70,7 @@ h2{font-size:18px;margin-bottom:8px;}
 <h2>修改密码</h2>
 <?php if($user['must_change_pw']): ?><p class="sub">首次登录请修改默认密码</p><?php endif; ?>
 <?php if($error) echo '<div class="error">'.h($error).'</div>'; ?>
-<?php if($success) echo '<div class="success">'.h($success).'</div>'; ?>
+<?php if($success) echo '<div class="success">'.h($success).'<br><span id="countdown" style="font-size:12px;">3 秒后自动跳转库存页...</span></div>'; ?>
 <form method="post">
     <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
     <div class="form-group"><label>当前密码</label><input name="old_password" type="password" required></div>
@@ -86,4 +86,15 @@ h2{font-size:18px;margin-bottom:8px;}
     <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text2);text-decoration:none;">元件库存管理系统 v1.0.2</a>
     &middot; &copy; <?= date('Y') ?> <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text2);text-decoration:none;">xiaoxu798</a>
 </div>
+<?php if($success): ?>
+<script>
+var cd = 3;
+var timer = setInterval(function(){
+    cd--;
+    var el = document.getElementById('countdown');
+    if (el) el.textContent = cd + ' 秒后自动跳转库存页...';
+    if (cd <= 0) { clearInterval(timer); window.location.href = 'index.php'; }
+}, 1000);
+</script>
+<?php endif; ?>
 </body></html>

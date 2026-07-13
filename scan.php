@@ -580,8 +580,9 @@ function undoScan(scanLogId, btn) {
     fetch('action.php', { method: 'POST', body: fd })
     .then(function(r){ return r.json(); })
     .then(function(data){
-        if (btn) { btn.disabled = false; btn.textContent = '↩ 撤销'; }
         if (data.ok) {
+            // 成功后保持按钮禁用（页面即将刷新）
+            if (btn) { btn.disabled = true; btn.textContent = '✓ 已撤销'; }
             showToast('已撤销: ' + (data.part_no || ''), 'success');
             playSuccessSound();
             vibrate(30);
