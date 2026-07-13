@@ -108,7 +108,7 @@ function initDB(): void {
         id            INT AUTO_INCREMENT PRIMARY KEY,
         username      VARCHAR(50) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
-        role          ENUM('admin','user') DEFAULT 'user',
+        role          ENUM('admin','user') DEFAULT 'admin',
         must_change_pw TINYINT(1) DEFAULT 0,
         created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
         last_login    DATETIME
@@ -246,6 +246,12 @@ function initDB(): void {
                ->execute([json_encode($perms, JSON_UNESCAPED_UNICODE), $su['id']]);
         }
         $db->prepare("UPDATE settings SET v='10' WHERE k='schema_version'")->execute();
+    }
+
+    // V11: 用户角色重构 — 将无 parent_id 的 'user' 角色升级为 'admin'（删除普通用户角色）
+    if ($schemaVer < 11) {
+        $db->exec("UPDATE users SET role='admin' WHERE role='user' AND (parent_id IS NULL OR parent_id=0)");
+        $db->prepare("UPDATE settings SET v='11' WHERE k='schema_version'")->execute();
     }
 
     // 分类表

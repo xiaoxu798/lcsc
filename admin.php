@@ -811,21 +811,19 @@ if ($flash !== '') {
         <?php if ($u['must_change_pw']) echo '<span class="badge badge-yellow" style="margin-left:4px">需改密</span>'; ?>
     </td>
     <td>
-        <span class="badge <?=$u['role']==='admin'?'badge-blue':'badge-green'?>"><?=h($u['role'])?></span>
+        <?php
+        $roleLabel = '普通管理员';
+        $roleBadge = 'badge-blue';
+        if ($u['id'] === 1) { $roleLabel = '超级管理员'; $roleBadge = 'badge-yellow'; }
+        elseif (!empty($u['parent_id'])) { $roleLabel = '子用户'; $roleBadge = 'badge-green'; }
+        ?>
+        <span class="badge <?=$roleBadge?>"><?=h($roleLabel)?></span>
     </td>
     <td style="font-size:12px;color:var(--text2)"><?=h(substr((string)$u['created_at'], 0, 10))?></td>
     <td style="font-size:12px;color:var(--text2)"><?=h(substr((string)($u['last_login'] ?? '—'), 0, 10))?></td>
     <td class="td-actions">
         <?php if ($u['id'] !== $uid): ?>
         <div class="actions">
-            <!-- 切换角色 -->
-            <form method="post" style="display:inline">
-                <input type="hidden" name="action" value="user_role">
-                <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
-                <input type="hidden" name="target_id" value="<?=$u['id']?>">
-                <input type="hidden" name="role" value="<?=$u['role']==='admin'?'user':'admin'?>">
-                <button type="submit" class="btn btn-ghost btn-xs"><?=$u['role']==='admin'?'降为用户':'升为管理员'?></button>
-            </form>
             <!-- 重置密码 -->
             <form method="post" style="display:inline">
                 <input type="hidden" name="action" value="user_reset_pw">

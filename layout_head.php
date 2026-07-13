@@ -378,7 +378,7 @@ tbody tr:hover td{background:var(--surface2);}
 
 <!-- ── 底部版权（由 JS 移动到页面末尾）── -->
 <footer class="site-footer" style="text-align:center;padding:10px 12px;font-size:11px;color:var(--text3);border-top:1px solid var(--border);">
-    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">元件库存管理系统 v1.0.2</a>
+    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">元件库存管理系统 v1.0.3</a>
     &middot;
     &copy; <?= date('Y') ?> <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">xiaoxu798</a>
     &middot;

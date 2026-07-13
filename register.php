@@ -53,7 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $db   = getDB();
         $hash = password_hash($password, PASSWORD_DEFAULT);
         try {
-            $db->prepare("INSERT INTO users (username,password_hash,role) VALUES (?,?,'user')")->execute([$username,$hash]);
+            $db->prepare("INSERT INTO users (username,password_hash,role) VALUES (?,?,'admin')")->execute([$username,$hash]);
             $uid = (int)$db->lastInsertId();
             if ($regMode === 'invite') {
                 // 更新邀请码使用者为真实 uid
@@ -166,7 +166,7 @@ h2{font-size:18px;margin-bottom:22px;color:var(--accent);}
 <div class="footer-links"><a href="login.php">← 返回登录</a></div>
 </div>
 <div style="position:fixed;bottom:0;left:0;right:0;text-align:center;padding:8px 12px;font-size:11px;color:var(--text2);background:var(--bg);">
-    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text2);text-decoration:none;">元件库存管理系统 v1.0.2</a>
+    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text2);text-decoration:none;">元件库存管理系统 v1.0.3</a>
     &middot; &copy; <?= date('Y') ?> <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text2);text-decoration:none;">xiaoxu798</a>
 </div>
 </body></html>

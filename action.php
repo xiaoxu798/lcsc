@@ -120,6 +120,24 @@ try {
                ->execute([$location, ...$validIds, $dataUid]);
             redirect('index.php?flash=ok');
 
+        // ==================== 按分类批量设置库位 ====================
+        case 'batch_set_category_location':
+            if (!hasPermission('can_edit') || !hasPermission('can_batch')) redirect('categories.php');
+            $catIds   = array_map('intval', $_POST['cat_ids'] ?? []);
+            $location = trim($_POST['location'] ?? '');
+            if (empty($catIds) || $location === '') redirect('categories.php?flash=err');
+            $in = implode(',', array_fill(0, count($catIds), '?'));
+            // 验证分类属于当前用户
+            $valid = $db->prepare("SELECT id FROM categories WHERE id IN ($in) AND user_id=?");
+            $valid->execute([...$catIds, $dataUid]);
+            $validIds = array_column($valid->fetchAll(), 'id');
+            if (empty($validIds)) redirect('categories.php?flash=err');
+            $inV = implode(',', array_fill(0, count($validIds), '?'));
+            // 更新属于这些分类的所有元件的库位
+            $db->prepare("UPDATE parts SET location=? WHERE user_id=? AND id IN (SELECT part_id FROM part_categories WHERE category_id IN ($inV))")
+               ->execute([$location, $dataUid, ...$validIds]);
+            redirect('categories.php?flash=ok');
+
         // ==================== 出入库操作（所有用户）====================
         case 'stock':
             $id   = intval($_POST['id']);

@@ -34,6 +34,20 @@ $cats = $db->prepare("SELECT c.id,c.name,COUNT(pc.part_id) AS cnt FROM categorie
 $cats->execute([$dataUid]);
 $cats = $cats->fetchAll();
 
+// 获取每个分类的库位分布
+$catLocations = [];
+if ($cats) {
+    $catIds = array_column($cats, 'id');
+    $inCats = implode(',', array_fill(0, count($catIds), '?'));
+    $locStmt = $db->prepare("SELECT pc.category_id, p.location, COUNT(*) as loc_cnt FROM part_categories pc INNER JOIN parts p ON p.id=pc.part_id WHERE pc.category_id IN ($inCats) AND p.user_id=? AND p.location IS NOT NULL AND p.location<>'' GROUP BY pc.category_id, p.location ORDER BY pc.category_id, loc_cnt DESC");
+    $locStmt->execute([...$catIds, $dataUid]);
+    foreach ($locStmt->fetchAll() as $lr) {
+        $cid = (int)$lr['category_id'];
+        if (!isset($catLocations[$cid])) $catLocations[$cid] = [];
+        $catLocations[$cid][] = $lr;
+    }
+}
+
 $pageTitle = '分类管理';
 $activePage = 'categories';
 require 'layout_head.php';
@@ -49,11 +63,40 @@ require 'layout_head.php';
         <p style="color:var(--text2);font-size:13px">共 <?=count($cats)?> 个分类</p>
     </div>
     <?php if(hasPermission('can_manage_categories')): ?>
-    <div style="display:flex;gap:8px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-ghost" onclick="togglePanel('mergePanel')">合并分类</button>
         <button class="btn btn-primary" onclick="togglePanel('thresholdPanel')">批量设置阈值</button>
+        <button class="btn btn-primary" onclick="togglePanel('locationPanel')">📍 批量设置库位</button>
     </div>
     <?php endif; ?>
+</div>
+
+<!-- 批量设置库位 -->
+<div id="locationPanel" style="display:none" class="card card-pad" style="margin-bottom:16px">
+    <div class="sec-title">📍 批量设置库位</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:14px">勾选分类，统一设置该分类下所有元件的库位（如：抽屉A1、货架B-2层）</p>
+    <form method="post" action="action.php">
+    <input type="hidden" name="action" value="batch_set_category_location">
+    <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+            <input type="checkbox" id="selectAllCatsLoc" style="accent-color:var(--accent)" onchange="document.querySelectorAll('.cat-cb-loc').forEach(c=>c.checked=this.checked)">
+            全选
+        </label>
+        <?php foreach($cats as $c): ?>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+            <input type="checkbox" name="cat_ids[]" value="<?=$c['id']?>" class="cat-cb-loc" style="accent-color:var(--accent)">
+            <?=h($c['name'])?> <span style="color:var(--text3);font-size:11px">(<?=$c['cnt']?>)</span>
+        </label>
+        <?php endforeach; ?>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="form-group" style="margin:0;flex:1;min-width:200px">
+            <input name="location" placeholder="输入库位（如：抽屉A1）" required style="width:100%">
+        </div>
+        <button type="submit" class="btn btn-primary">📍 一键设置库位</button>
+    </div>
+    </form>
 </div>
 
 <!-- 批量设置低库存阈值 -->
@@ -116,18 +159,31 @@ require 'layout_head.php';
 <div class="table-wrap">
 <table>
     <thead><tr>
-        <th>分类名称</th><th>元件数量</th><th>操作</th>
+        <th>分类名称</th><th>元件数量</th><th>主要库位</th><th>操作</th>
     </tr></thead>
     <tbody>
     <?php if(empty($cats)): ?>
-        <tr><td colspan="3"><div class="empty-state"><div class="icon">🏷️</div>暂无分类，导入订单后自动生成</div></td></tr>
-    <?php else: foreach($cats as $c): ?>
+        <tr><td colspan="4"><div class="empty-state"><div class="icon">🏷️</div>暂无分类，导入订单后自动生成</div></td></tr>
+    <?php else: foreach($cats as $c):
+        $locs = $catLocations[(int)$c['id']] ?? [];
+        $locDisplay = '-';
+        if (!empty($locs)) {
+            if (count($locs) === 1) {
+                $locDisplay = '<span style="font-family:\'JetBrains Mono\',monospace;font-size:12px;color:var(--accent)">📍' . h($locs[0]['location']) . '</span>';
+            } else {
+                $topLoc = h($locs[0]['location']);
+                $more = count($locs) - 1;
+                $locDisplay = '<span style="font-family:\'JetBrains Mono\',monospace;font-size:12px;color:var(--accent)">📍' . $topLoc . '</span> <span style="font-size:11px;color:var(--text3)">+' . $more . '</span>';
+            }
+        }
+    ?>
     <tr>
         <td>
             <span id="catName_<?=$c['id']?>"><?=h($c['name'])?></span>
             <input id="catInput_<?=$c['id']?>" value="<?=h($c['name'])?>" style="display:none;background:var(--surface2);border:1px solid var(--accent);color:var(--text);padding:3px 8px;border-radius:5px;font-size:13px;width:200px">
         </td>
         <td><span class="cat-tag"><?=$c['cnt']?> 个元件</span></td>
+        <td><?=$locDisplay?></td>
         <td>
             <?php if(hasPermission('can_manage_categories')): ?>
             <div class="actions">

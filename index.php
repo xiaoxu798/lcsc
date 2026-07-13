@@ -15,6 +15,7 @@ $filter  = $_GET['filter'] ?? '';
 if (!in_array($filter, ['low', 'zero'], true)) $filter = '';
 $catId   = intval($_GET['cat'] ?? 0);
 $platId  = intval($_GET['plat'] ?? 0);
+$locFilter = trim($_GET['loc'] ?? '');
 $noCat   = ($catId === -1);
 
 $where = ["p.user_id=?"]; $params = [$dataUid];
@@ -27,6 +28,7 @@ if ($filter==='low')       $where[] = "p.stock>0 AND p.stock<=p.low_stock_thresh
 if ($filter==='zero')      $where[] = "p.stock=0";
 
 if ($platId>0) { $where[] = "p.platform_id=?"; $params[] = $platId; }
+if ($locFilter !== '') { $where[] = "p.location=?"; $params[] = $locFilter; }
 
 $joinCat = '';
 if ($catId>0) {
@@ -66,6 +68,10 @@ $stats->execute([$dataUid]); $stats = $stats->fetch();
 
 $allCats = $db->prepare("SELECT c.id,c.name,COUNT(pc.part_id) AS cnt FROM categories c LEFT JOIN part_categories pc ON pc.category_id=c.id WHERE c.user_id=? GROUP BY c.id ORDER BY cnt DESC LIMIT 50");
 $allCats->execute([$dataUid]); $allCats = $allCats->fetchAll();
+
+// 获取所有已设置的库位列表（去重）
+$allLocs = $db->prepare("SELECT DISTINCT location FROM parts WHERE user_id=? AND location IS NOT NULL AND location<>'' ORDER BY location ASC");
+$allLocs->execute([$dataUid]); $allLocs = $allLocs->fetchAll(PDO::FETCH_COLUMN);
 
 $ncStmt = $db->prepare("SELECT COUNT(DISTINCT p.id) FROM parts p LEFT JOIN part_categories pc2 ON pc2.part_id=p.id WHERE p.user_id=? AND pc2.part_id IS NULL");
 $ncStmt->execute([$dataUid]); $noCatCount = (int)$ncStmt->fetchColumn();
@@ -126,12 +132,12 @@ require 'layout_head.php';
         <button id="catToggle" onclick="toggleCats()" style="background:none;border:none;color:var(--accent);font-size:11px;cursor:pointer;padding:0 4px">▼ 展开</button>
     </div>
     <div id="catPills" style="display:flex;flex-wrap:wrap;gap:5px;overflow:hidden;max-height:30px;transition:max-height .25s ease">
-        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>" class="pill <?=$catId===0&&!$noCat?'active':''?>">全部</a>
+        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>" class="pill <?=$catId===0&&!$noCat?'active':''?>">全部</a>
         <?php if($noCatCount>0): ?>
-        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&cat=-1" class="pill <?=$noCat?'active':''?>" style="border-style:dashed">未分类 <span style="opacity:.5"><?=$noCatCount?></span></a>
+        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&cat=-1" class="pill <?=$noCat?'active':''?>" style="border-style:dashed">未分类 <span style="opacity:.5"><?=$noCatCount?></span></a>
         <?php endif; ?>
         <?php foreach($allCats as $c): ?>
-        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&cat=<?=$c['id']?>" class="pill <?=$catId==$c['id']?'active':''?>"><?=h($c['name'])?> <span style="opacity:.5"><?=$c['cnt']?></span></a>
+        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&cat=<?=$c['id']?>" class="pill <?=$catId==$c['id']?'active':''?>"><?=h($c['name'])?> <span style="opacity:.5"><?=$c['cnt']?></span></a>
         <?php endforeach; ?>
     </div>
 </div>
@@ -150,15 +156,23 @@ require 'layout_head.php';
         </form>
     </div>
     <div class="pills">
-        <a href="?q=<?=urlencode($q)?>&cat=<?=$catId?>&plat=<?=$platId?>" class="pill <?=$filter===''?'active':''?>">全部</a>
-        <a href="?q=<?=urlencode($q)?>&cat=<?=$catId?>&plat=<?=$platId?>&filter=low" class="pill warn <?=$filter==='low'?'active':''?>">⚠ 不足</a>
-        <a href="?q=<?=urlencode($q)?>&cat=<?=$catId?>&plat=<?=$platId?>&filter=zero" class="pill danger <?=$filter==='zero'?'active':''?>">✗ 用完</a>
+        <a href="?q=<?=urlencode($q)?>&cat=<?=$catId?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>" class="pill <?=$filter===''?'active':''?>">全部</a>
+        <a href="?q=<?=urlencode($q)?>&cat=<?=$catId?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&filter=low" class="pill warn <?=$filter==='low'?'active':''?>">⚠ 不足</a>
+        <a href="?q=<?=urlencode($q)?>&cat=<?=$catId?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&filter=zero" class="pill danger <?=$filter==='zero'?'active':''?>">✗ 用完</a>
     </div>
     <?php if(count($allPlats)>1): ?>
-    <select onchange="location='?q=<?=urlencode($q)?>&cat=<?=$catId?>&filter=<?=h($filter)?>&plat='+this.value" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:7px;font-size:12px;">
+    <select onchange="location='?q=<?=urlencode($q)?>&cat=<?=$catId?>&filter=<?=h($filter)?>&loc=<?=urlencode($locFilter)?>&plat='+this.value" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:7px;font-size:12px;">
         <option value="0" <?=$platId===0?'selected':''?>>所有平台</option>
         <?php foreach($allPlats as $pl): ?>
         <option value="<?=$pl['id']?>" <?=$platId==$pl['id']?'selected':''?>><?=h($pl['name'])?></option>
+        <?php endforeach; ?>
+    </select>
+    <?php endif; ?>
+    <?php if(!empty($allLocs)): ?>
+    <select onchange="location='?q=<?=urlencode($q)?>&cat=<?=$catId?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc='+encodeURIComponent(this.value)" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:7px;font-size:12px;">
+        <option value="" <?=$locFilter===''?'selected':''?>>所有库位</option>
+        <?php foreach($allLocs as $loc): ?>
+        <option value="<?=h($loc)?>" <?=$locFilter===$loc?'selected':''?>>📍<?=h($loc)?></option>
         <?php endforeach; ?>
     </select>
     <?php endif; ?>
