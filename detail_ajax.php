@@ -84,7 +84,7 @@ foreach($fields as $k=>$v):
 <?php endif; ?>
 </td></tr>
 <?php endforeach; ?>
-<tr><td>低库存阈值</td><td style="font-family:'JetBrains Mono',monospace"><?=$part['low_stock_threshold']?></td></tr>
+<tr><td>低库存阈值</td><td style="font-family:'JetBrains Mono',monospace"><?=h2((string)($part['low_stock_threshold'] ?? ''))?></td></tr>
 <tr><td>最近更新</td><td style="font-family:'JetBrains Mono',monospace;font-size:12px"><?=h2(substr($part['update_time']??'',0,16))?></td></tr>
 </table>
 

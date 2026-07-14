@@ -9,7 +9,7 @@ $dataUid = getDataUserId();
 
 $flash = $_GET['flash'] ?? '';
 
-// 批量设置低库存阈值（仅管理员）
+// 批量设置低库存阈值（仅管理员）—— 设置分类级阈值
 if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='batch_threshold') {
     if (!hasPermission('can_edit') || !hasPermission('can_batch')) { header('Location: index.php'); exit; }
     verifyCsrf();
@@ -23,16 +23,27 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='batch_thres
         $validIds = array_column($valid->fetchAll(), 'id');
         if ($validIds) {
             $inV  = implode(',', array_fill(0, count($validIds), '?'));
-            $db->prepare("UPDATE parts SET low_stock_threshold=? WHERE user_id=? AND id IN (SELECT part_id FROM part_categories WHERE category_id IN ($inV))")
-               ->execute([$threshold, $uid, ...$validIds]);
+            // 设置分类级阈值（中优先级），不影响单品已设阈值
+            $db->prepare("UPDATE categories SET low_stock_threshold=? WHERE id IN ($inV) AND user_id=?")
+               ->execute([$threshold, $dataUid, ...$validIds]);
         }
     }
     header('Location: categories.php?flash=ok'); exit;
 }
 
-$cats = $db->prepare("SELECT c.id,c.name,COUNT(pc.part_id) AS cnt FROM categories c LEFT JOIN part_categories pc ON pc.category_id=c.id WHERE c.user_id=? GROUP BY c.id ORDER BY cnt DESC,c.name ASC");
+$cats = $db->prepare("SELECT c.id,c.name,c.low_stock_threshold,COUNT(pc.part_id) AS cnt FROM categories c LEFT JOIN part_categories pc ON pc.category_id=c.id WHERE c.user_id=? GROUP BY c.id ORDER BY cnt DESC,c.name ASC");
 $cats->execute([$dataUid]);
 $cats = $cats->fetchAll();
+
+// 分页
+$page    = max(1, intval($_GET['page'] ?? 1));
+$perPage = intval($_GET['per_page'] ?? 25);
+$perPage = max(10, min(50, $perPage));
+$total   = count($cats);
+$totalPage = max(1, ceil($total / $perPage));
+$page      = min($page, $totalPage);
+$offset    = ($page - 1) * $perPage;
+$catsPage  = array_slice($cats, $offset, $perPage);
 
 // 获取每个分类的库位分布
 $catLocations = [];
@@ -159,12 +170,12 @@ require 'layout_head.php';
 <div class="table-wrap">
 <table>
     <thead><tr>
-        <th>分类名称</th><th>元件数量</th><th>主要库位</th><th>操作</th>
+        <th>分类名称</th><th>元件数量</th><th>分类阈值</th><th>主要库位</th><th>操作</th>
     </tr></thead>
     <tbody>
-    <?php if(empty($cats)): ?>
-        <tr><td colspan="4"><div class="empty-state"><div class="icon">🏷️</div>暂无分类，导入订单后自动生成</div></td></tr>
-    <?php else: foreach($cats as $c):
+    <?php if(empty($catsPage)): ?>
+        <tr><td colspan="5"><div class="empty-state"><div class="icon">🏷️</div>暂无分类，导入订单后自动生成</div></td></tr>
+    <?php else: foreach($catsPage as $c):
         $locs = $catLocations[(int)$c['id']] ?? [];
         $locDisplay = '-';
         if (!empty($locs)) {
@@ -183,6 +194,7 @@ require 'layout_head.php';
             <input id="catInput_<?=$c['id']?>" value="<?=h($c['name'])?>" style="display:none;background:var(--surface2);border:1px solid var(--accent);color:var(--text);padding:3px 8px;border-radius:5px;font-size:13px;width:200px">
         </td>
         <td><span class="cat-tag"><?=$c['cnt']?> 个元件</span></td>
+        <td><?= $c['low_stock_threshold'] !== null ? '<span class="badge badge-blue">'.h((string)$c['low_stock_threshold']).'</span>' : '<span style="color:var(--text3);font-size:12px">继承全局</span>' ?></td>
         <td><?=$locDisplay?></td>
         <td>
             <?php if(hasPermission('can_manage_categories')): ?>
@@ -208,6 +220,29 @@ require 'layout_head.php';
     </tbody>
 </table>
 </div>
+
+<!-- 分页 -->
+<?php if($totalPage > 1 || $total > 0): ?>
+<div class="pagination">
+    <a href="?per_page=<?=$perPage?>&page=<?=$page-1?>" class="page-btn <?=$page<=1?'disabled':''?>">‹</a>
+    <?php
+    $s = max(1,$page-2); $e = min($totalPage,$page+2);
+    if($s>1) echo '<a href="?per_page='.$perPage.'&page=1" class="page-btn">1</a>';
+    if($s>2) echo '<span class="page-info">…</span>';
+    for($i=$s;$i<=$e;$i++) echo '<a href="?per_page='.$perPage.'&page='.$i.'" class="page-btn '.($i===$page?'active':'').'">'.$i.'</a>';
+    if($e<$totalPage-1) echo '<span class="page-info">…</span>';
+    if($e<$totalPage) echo '<a href="?per_page='.$perPage.'&page='.$totalPage.'" class="page-btn">'.$totalPage.'</a>';
+    ?>
+    <a href="?per_page=<?=$perPage?>&page=<?=$page+1?>" class="page-btn <?=$page>=$totalPage?'disabled':''?>">›</a>
+    <span class="page-info">共 <?=$total?> 个分类</span>
+    <select onchange="location='?per_page='+this.value" class="per-page-select">
+        <option value="10" <?=$perPage===10?'selected':''?>>10条/页</option>
+        <option value="25" <?=$perPage===25?'selected':''?>>25条/页</option>
+        <option value="50" <?=$perPage===50?'selected':''?>>50条/页</option>
+    </select>
+</div>
+<?php endif; ?>
+
 </div>
 </div>
 

@@ -6,10 +6,12 @@ $user = requireLogin();
 $db   = getDB();
 $uid  = $user['id'];
 $dataUid = getDataUserId(); // 子用户继承父用户数据
+$globalThr = getGlobalThreshold($dataUid); // 全局低库存阈值（三级优先级最低）
 
 $q       = trim($_GET['q'] ?? '');
 $page    = max(1, intval($_GET['page'] ?? 1));
-$perPage = 25;
+$perPage = intval($_GET['per_page'] ?? 25);
+$perPage = max(10, min(50, $perPage)); // 限制 10~50
 $filter  = $_GET['filter'] ?? '';
 // 白名单校验：仅允许 'low' 和 'zero'，防止 XSS 和 SQL 注入
 if (!in_array($filter, ['low', 'zero'], true)) $filter = '';
@@ -19,12 +21,52 @@ $locFilter = trim($_GET['loc'] ?? '');
 $noCat   = ($catId === -1);
 
 $where = ["p.user_id=?"]; $params = [$dataUid];
+$searchKeywordCount = 0;
 if ($q !== '') {
-    $like = "%$q%";
-    $where[] = "(p.model LIKE ? OR p.platform_part_no LIKE ? OR p.product_name LIKE ? OR p.brand LIKE ? OR p.customer_part_no LIKE ?)";
-    array_push($params,$like,$like,$like,$like,$like);
+    // 按空格分割为多个关键词，每个关键词独立匹配（AND关系）
+    $keywords = preg_split('/\s+/', $q, -1, PREG_SPLIT_NO_EMPTY);
+    $searchKeywordCount = count($keywords);
+    // 元器件同义词映射表（中文↔英文）
+    $synonyms = [
+        '电阻'   => ['resistor','电阻'],
+        '电容'   => ['capacitor','电容'],
+        '电感'   => ['inductor','电感'],
+        '二极管' => ['diode','二极管'],
+        '三极管' => ['transistor','三极管'],
+        'mos管'  => ['mosfet','mos'],
+        '芯片'   => ['ic','chip','芯片'],
+        '连接器' => ['connector','连接器'],
+        '继电器' => ['relay','继电器'],
+        '晶振'   => ['crystal','oscillator','晶振'],
+        '开关'   => ['switch','开关'],
+        '插座'   => ['socket','header','插座','排针'],
+        '光耦'   => ['optocoupler','opto','光耦'],
+        '保险丝' => ['fuse','保险丝'],
+    ];
+    foreach ($keywords as $kw) {
+        // 查找同义词组
+        $syns = [$kw];
+        $kwLower = mb_strtolower($kw, 'UTF-8');
+        foreach ($synonyms as $cn => $enList) {
+            $allForms = array_merge([$cn], $enList);
+            foreach ($allForms as $form) {
+                if (mb_strtolower($form, 'UTF-8') === $kwLower) {
+                    $syns = $enList;
+                    break 2;
+                }
+            }
+        }
+        // 每个关键词（含同义词）必须匹配至少一个字段（OR），多个关键词之间是 AND
+        $kwClauses = [];
+        foreach ($syns as $syn) {
+            $like = "%$syn%";
+            $kwClauses[] = "(p.model LIKE ? OR p.platform_part_no LIKE ? OR p.product_name LIKE ? OR p.brand LIKE ? OR p.customer_part_no LIKE ?)";
+            array_push($params, $like, $like, $like, $like, $like);
+        }
+        $where[] = '(' . implode(' OR ', $kwClauses) . ')';
+    }
 }
-if ($filter==='low')       $where[] = "p.stock>0 AND p.stock<=p.low_stock_threshold";
+if ($filter==='low')       $where[] = "p.stock>0 AND p.stock<=COALESCE(p.low_stock_threshold,(SELECT c.low_stock_threshold FROM part_categories pc JOIN categories c ON c.id=pc.category_id WHERE pc.part_id=p.id AND c.low_stock_threshold IS NOT NULL LIMIT 1),$globalThr)";
 if ($filter==='zero')      $where[] = "p.stock=0";
 
 if ($platId>0) { $where[] = "p.platform_id=?"; $params[] = $platId; }
@@ -46,7 +88,7 @@ $totalPage = max(1,ceil($total/$perPage));
 $page      = min($page,$totalPage);
 $offset    = ($page-1)*$perPage;
 
-$rows = $db->prepare("SELECT p.*,pl.name AS pname,pl.url_template FROM parts p LEFT JOIN platforms pl ON pl.id=p.platform_id $joinCat $whereSql ORDER BY p.update_time DESC LIMIT $perPage OFFSET $offset");
+$rows = $db->prepare("SELECT p.*,pl.name AS pname,pl.url_template,COALESCE(p.low_stock_threshold,(SELECT c.low_stock_threshold FROM part_categories pc JOIN categories c ON c.id=pc.category_id WHERE pc.part_id=p.id AND c.low_stock_threshold IS NOT NULL LIMIT 1),$globalThr) AS eff_threshold FROM parts p LEFT JOIN platforms pl ON pl.id=p.platform_id $joinCat $whereSql ORDER BY p.update_time DESC LIMIT $perPage OFFSET $offset");
 $rows->execute($params); $rows = $rows->fetchAll();
 
 $pids = array_column($rows,'id');
@@ -62,9 +104,9 @@ if ($pids) {
 $stats = $db->prepare("SELECT COUNT(*) AS total,COALESCE(SUM(stock),0) AS total_stock,
     COALESCE(SUM(damaged),0) AS total_damaged,
     SUM(CASE WHEN stock=0 THEN 1 ELSE 0 END) AS zero_count,
-    SUM(CASE WHEN stock>0 AND stock<=low_stock_threshold THEN 1 ELSE 0 END) AS low_count
-    FROM parts WHERE user_id=?");
-$stats->execute([$dataUid]); $stats = $stats->fetch();
+    SUM(CASE WHEN stock>0 AND stock<=COALESCE(p.low_stock_threshold,(SELECT c.low_stock_threshold FROM part_categories pc JOIN categories c ON c.id=pc.category_id WHERE pc.part_id=p.id AND c.low_stock_threshold IS NOT NULL LIMIT 1),?) THEN 1 ELSE 0 END) AS low_count
+    FROM parts p WHERE p.user_id=?");
+$stats->execute([$globalThr, $dataUid]); $stats = $stats->fetch();
 
 $allCats = $db->prepare("SELECT c.id,c.name,COUNT(pc.part_id) AS cnt FROM categories c LEFT JOIN part_categories pc ON pc.category_id=c.id WHERE c.user_id=? GROUP BY c.id ORDER BY cnt DESC LIMIT 50");
 $allCats->execute([$dataUid]); $allCats = $allCats->fetchAll();
@@ -98,15 +140,35 @@ if ($noticeContent !== '' && $noticeMode !== 'off') {
     }
 }
 
+// 子用户分区公告（仅对子用户可见，由其父管理员的 user_settings 配置）
+$subNoticeContent = '';
+$subNoticeMode    = 'off';
+$showSubNotice    = false;
+if (($user['role'] ?? '') === 'user' && !empty($user['parent_id'])) {
+    $parentId = (int)$user['parent_id'];
+    $subNoticeContent = getUserSetting($parentId, 'sub_notice_content', '');
+    $subNoticeMode    = getUserSetting($parentId, 'sub_notice_mode', 'off');
+    if ($subNoticeContent !== '' && $subNoticeMode !== 'off') {
+        $subNoticeVer = 'sub_' . md5($subNoticeContent);
+        if ($subNoticeMode === 'always') {
+            $showSubNotice = true;
+        } else {
+            $seen2 = $db->prepare("SELECT 1 FROM notice_seen WHERE user_id=? AND version=?");
+            $seen2->execute([$uid,$subNoticeVer]);
+            if (!$seen2->fetchColumn()) {
+                $showSubNotice = true;
+                $db->prepare("INSERT IGNORE INTO notice_seen (user_id,version) VALUES (?,?)")->execute([$uid,$subNoticeVer]);
+            }
+        }
+    }
+}
+
 $flash = $_GET['flash'] ?? '';
 $loginFlash = $_SESSION['login_flash'] ?? '';
 if ($loginFlash) unset($_SESSION['login_flash']);
 $pageTitle = '库存总览';
 $activePage = 'index';
 $extraTopbarRight = '
-    <a href="scan.php" class="icon-btn">
-        扫码
-    </a>
     <a href="change_password.php" class="icon-btn">'.h($user['username']).'</a>';
 require 'layout_head.php';
 ?>
@@ -127,17 +189,14 @@ require 'layout_head.php';
 <!-- 分类筛选（可折叠） -->
 <?php if($allCats || $noCatCount>0): ?>
 <div style="margin-bottom:12px">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <span style="font-size:11px;color:var(--text3);letter-spacing:.3px">分类筛选</span>
-        <button id="catToggle" onclick="toggleCats()" style="background:none;border:none;color:var(--accent);font-size:11px;cursor:pointer;padding:0 4px">▼ 展开</button>
-    </div>
-    <div id="catPills" style="display:flex;flex-wrap:wrap;gap:5px;overflow:hidden;max-height:30px;transition:max-height .25s ease">
-        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>" class="pill <?=$catId===0&&!$noCat?'active':''?>">全部</a>
+    <div id="catPills" style="display:flex;flex-wrap:wrap;gap:6px;overflow:hidden;max-height:36px;transition:max-height .25s ease">
+        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>" class="pill cat-pill <?=$catId===0&&!$noCat?'active':''?>">全部</a>
+        <button id="catToggle" onclick="toggleCats()" class="pill cat-pill-toggle" style="background:var(--surface2);border:1px solid var(--border);color:var(--accent);cursor:pointer;font-size:11px;padding:4px 10px;border-radius:6px;white-space:nowrap">▼</button>
         <?php if($noCatCount>0): ?>
-        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&cat=-1" class="pill <?=$noCat?'active':''?>" style="border-style:dashed">未分类 <span style="opacity:.5"><?=$noCatCount?></span></a>
+        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&cat=-1" class="pill cat-pill <?=$noCat?'active':''?>" style="border-style:dashed">未分类 <span style="opacity:.5"><?=$noCatCount?></span></a>
         <?php endif; ?>
         <?php foreach($allCats as $c): ?>
-        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&cat=<?=$c['id']?>" class="pill <?=$catId==$c['id']?'active':''?>"><?=h($c['name'])?> <span style="opacity:.5"><?=$c['cnt']?></span></a>
+        <a href="?q=<?=urlencode($q)?>&filter=<?=h($filter)?>&plat=<?=$platId?>&loc=<?=urlencode($locFilter)?>&cat=<?=$c['id']?>" class="pill cat-pill <?=$catId==$c['id']?'active':''?>"><?=h($c['name'])?> <span style="opacity:.5"><?=$c['cnt']?></span></a>
         <?php endforeach; ?>
     </div>
 </div>
@@ -147,12 +206,14 @@ require 'layout_head.php';
 <div class="toolbar">
     <div class="search-box">
         <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        <form method="get" id="searchForm" style="display:flex;gap:0">
-            <input name="q" id="searchInput" value="<?=h($q)?>" placeholder="搜索型号 / 商品编号 / 名称 / 品牌..." autocomplete="off" style="border-radius:7px 0 0 7px;border-right:none">
+        <form method="get" id="searchForm" style="display:flex;gap:0;position:relative;">
+            <input name="q" id="searchInput" value="<?=h($q)?>" placeholder="搜索型号 / 商品编号 / 名称 / 品牌（空格分隔多关键词）..." autocomplete="off" style="border-radius:7px 0 0 7px;border-right:none;padding-right:28px;">
+            <button type="button" id="clearSearchBtn" onclick="clearSearch()" style="position:absolute;right:55px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:2px 4px;line-height:1;z-index:2;display:none;" title="清空搜索">✕</button>
             <button type="submit" style="background:var(--accent);border:none;color:#fff;padding:0 14px;border-radius:0 7px 7px 0;cursor:pointer;font-size:13px;white-space:nowrap">搜索</button>
             <?php if($filter)  echo '<input type="hidden" name="filter" value="'.h($filter).'">'; ?>
             <?php if($catId)   echo '<input type="hidden" name="cat" value="'.$catId.'">'; ?>
             <?php if($platId)  echo '<input type="hidden" name="plat" value="'.$platId.'">'; ?>
+            <?php if($locFilter) echo '<input type="hidden" name="loc" value="'.h($locFilter).'">'; ?>
         </form>
     </div>
     <div class="pills">
@@ -194,10 +255,18 @@ require 'layout_head.php';
     </tr></thead>
     <tbody>
     <?php if(empty($rows)): ?>
-        <tr><td colspan="<?=isAdmin()?'11':'10'?>"><div class="empty-state"><div class="icon">📦</div>暂无数据</div></td></tr>
+        <tr><td colspan="<?=isAdmin()?'11':'10'?>"><div class="empty-state"><div class="icon">📦</div><?php
+            if ($q !== '' && $searchKeywordCount > 1) {
+                echo '未找到匹配「' . h($q) . '」的元件<br><span style="font-size:12px;color:var(--text3)">提示：多个关键词之间为 AND 关系（需同时匹配），请尝试减少关键词后重新搜索</span>';
+            } elseif ($q !== '') {
+                echo '未找到匹配「' . h($q) . '」的元件';
+            } else {
+                echo '暂无数据';
+            }
+        ?></div></td></tr>
     <?php else: foreach($rows as $r):
-        $sc = $r['stock']==0?'s-zero':($r['stock']<=$r['low_stock_threshold']?'s-low':'s-ok');
-        $rc = $r['stock']==0?'row-zero':($r['stock']<=$r['low_stock_threshold']?'row-low':'');
+        $sc = $r['stock']==0?'s-zero':($r['stock']<=($r['eff_threshold'] ?? $globalThr)?'s-low':'s-ok');
+        $rc = $r['stock']==0?'row-zero':($r['stock']<=($r['eff_threshold'] ?? $globalThr)?'row-low':'');
         $partJson = h(json_encode($r, JSON_UNESCAPED_UNICODE));
         $stockInfo = h(json_encode(['id'=>$r['id'],'model'=>$r['model'],'stock'=>(int)$r['stock'],'damaged'=>(int)($r['damaged']??0)], JSON_UNESCAPED_UNICODE));
         $ppnUrl = ($r['url_template'] ?? '') !== '' ? platformUrl($r['url_template'], $r['platform_part_no'] ?? '') : '';
@@ -245,8 +314,8 @@ require 'layout_head.php';
 <?php if(empty($rows)): ?>
     <div class="empty-state"><div class="icon">📦</div>暂无数据</div>
 <?php else: foreach($rows as $r):
-    $sc = $r['stock']==0?'s-zero':($r['stock']<=$r['low_stock_threshold']?'s-low':'s-ok');
-    $bc = $r['stock']==0?'#ef4444':($r['stock']<=$r['low_stock_threshold']?'#f59e0b':'#22c55e');
+    $sc = $r['stock']==0?'s-zero':($r['stock']<=($r['eff_threshold'] ?? $globalThr)?'s-low':'s-ok');
+    $bc = $r['stock']==0?'#ef4444':($r['stock']<=($r['eff_threshold'] ?? $globalThr)?'#f59e0b':'#22c55e');
     $partJson = h(json_encode($r, JSON_UNESCAPED_UNICODE));
     $stockInfo = h(json_encode(['id'=>$r['id'],'model'=>$r['model'],'stock'=>(int)$r['stock'],'damaged'=>(int)($r['damaged']??0)], JSON_UNESCAPED_UNICODE));
     $ppnUrl = ($r['url_template'] ?? '') !== '' ? platformUrl($r['url_template'], $r['platform_part_no'] ?? '') : '';
@@ -297,23 +366,28 @@ require 'layout_head.php';
 </div>
 
 <!-- 分页 -->
-<?php if($totalPage>1):
+<?php if($totalPage>1 || $total>0):
     $qStr=http_build_query(array_filter([
-        'q'=>$q?:null,'filter'=>$filter?:null,'cat'=>$catId?:null,'plat'=>$platId?:null
+        'q'=>$q?:null,'filter'=>$filter?:null,'cat'=>$catId?:null,'plat'=>$platId?:null,'loc'=>$locFilter?:null
     ],fn($v)=>$v!==null));
 ?>
 <div class="pagination">
-    <a href="?<?=$qStr?>&page=<?=$page-1?>" class="page-btn <?=$page<=1?'disabled':''?>">‹</a>
+    <a href="?<?=$qStr?>&per_page=<?=$perPage?>&page=<?=$page-1?>" class="page-btn <?=$page<=1?'disabled':''?>">‹</a>
     <?php
     $s=max(1,$page-2);$e=min($totalPage,$page+2);
-    if($s>1) echo '<a href="?'.$qStr.'&page=1" class="page-btn">1</a>';
+    if($s>1) echo '<a href="?'.$qStr.'&per_page='.$perPage.'&page=1" class="page-btn">1</a>';
     if($s>2) echo '<span class="page-info">…</span>';
-    for($i=$s;$i<=$e;$i++) echo '<a href="?'.$qStr.'&page='.$i.'" class="page-btn '.($i===$page?'active':'').'">'.$i.'</a>';
+    for($i=$s;$i<=$e;$i++) echo '<a href="?'.$qStr.'&per_page='.$perPage.'&page='.$i.'" class="page-btn '.($i===$page?'active':'').'">'.$i.'</a>';
     if($e<$totalPage-1) echo '<span class="page-info">…</span>';
-    if($e<$totalPage) echo '<a href="?'.$qStr.'&page='.$totalPage.'" class="page-btn">'.$totalPage.'</a>';
+    if($e<$totalPage) echo '<a href="?'.$qStr.'&per_page='.$perPage.'&page='.$totalPage.'" class="page-btn">'.$totalPage.'</a>';
     ?>
-    <a href="?<?=$qStr?>&page=<?=$page+1?>" class="page-btn <?=$page>=$totalPage?'disabled':''?>">›</a>
+    <a href="?<?=$qStr?>&per_page=<?=$perPage?>&page=<?=$page+1?>" class="page-btn <?=$page>=$totalPage?'disabled':''?>">›</a>
     <span class="page-info">共 <?=$total?> 条</span>
+    <select onchange="location='?<?=$qStr?>&per_page='+this.value" class="per-page-select">
+        <option value="10" <?=$perPage===10?'selected':''?>>10条/页</option>
+        <option value="25" <?=$perPage===25?'selected':''?>>25条/页</option>
+        <option value="50" <?=$perPage===50?'selected':''?>>50条/页</option>
+    </select>
 </div>
 <?php endif; ?>
 </div><!-- /glass-box -->
@@ -325,6 +399,7 @@ require 'layout_head.php';
     <span>已选 <span class="batch-count" id="batchCount">0</span> 项</span>
     <button class="btn btn-ghost btn-sm" onclick="batchSetCategory()">设置分类</button>
     <button class="btn btn-ghost btn-sm" onclick="batchSetLocation()">设置库位</button>
+    <button class="btn btn-ghost btn-sm" onclick="batchSetRemark()">设置备注</button>
     <button class="btn btn-ghost btn-sm" onclick="batchPrint()">🖨 打印标签</button>
     <button class="btn btn-danger btn-sm" onclick="batchDelete()">批量删除</button>
     <button class="btn btn-ghost btn-sm" onclick="clearSelection()">取消选择</button>
@@ -375,6 +450,24 @@ require 'layout_head.php';
     </form>
 </div></div>
 
+<!-- 批量设置备注 Modal -->
+<div class="overlay" id="modalBatchRem">
+<div class="modal modal-sm">
+    <h3>批量设置备注</h3>
+    <form method="post" action="action.php" id="batchRemForm">
+    <input type="hidden" name="action" value="batch_set_remark">
+    <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+    <div id="batchRemIds"></div>
+    <div class="form-group"><label>备注内容</label>
+        <textarea name="remark" placeholder="输入备注内容（留空则清空备注）" rows="3"></textarea>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" onclick="closeOverlay('modalBatchRem')">取消</button>
+        <button type="submit" class="btn btn-primary">确认</button>
+    </div>
+    </form>
+</div></div>
+
 <!-- 详情抽屉 -->
 <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
 <div class="drawer" id="drawer">
@@ -419,7 +512,7 @@ require 'layout_head.php';
     </div>
     <div class="form-row">
         <div class="form-group"><label>库位/描述</label><input name="location" placeholder="抽屉A1"></div>
-        <div class="form-group"><label>低库存阈值</label><input name="low_stock_threshold" type="number" value="<?=h(getSetting('default_low_stock','10'))?>" min="0"></div>
+        <div class="form-group"><label>低库存阈值 <span style="font-size:11px;color:var(--text3);font-weight:normal">（留空继承全局）</span></label><input name="low_stock_threshold" type="number" placeholder="留空=继承全局阈值" min="0"></div>
     </div>
     <div class="form-group"><label>备注</label><textarea name="remark"></textarea></div>
     <div class="modal-footer">
@@ -452,9 +545,10 @@ require 'layout_head.php';
     </div>
     <div class="form-row">
         <div class="form-group"><label>库位/描述</label><input name="location" id="e_loc"></div>
-        <div class="form-group"><label>低库存阈值</label><input name="low_stock_threshold" id="e_thr" type="number" min="0"></div>
+        <div class="form-group"><label>低库存阈值 <span id="e_thr_hint" style="font-size:11px;color:var(--text3);font-weight:normal"></span></label><input name="low_stock_threshold" id="e_thr" type="number" placeholder="留空=继承分类/全局阈值" min="0"></div>
     </div>
     <div class="form-group"><label>备注</label><textarea name="remark" id="e_rem"></textarea></div>
+    <div class="form-group"><label>替代料型号（逗号分隔多个）</label><input name="alternatives" id="e_alts" placeholder="如: STM32F103C8T6, STM32F103CBT6"></div>
     <div class="modal-footer">
         <button type="button" class="btn btn-ghost" onclick="closeOverlay('modalEdit')">取消</button>
         <button type="submit" class="btn btn-primary">保存</button>
@@ -516,6 +610,16 @@ require 'layout_head.php';
 </div></div>
 <?php endif; ?>
 
+<!-- 子用户分区公告弹窗 -->
+<?php if($showSubNotice): ?>
+<div class="overlay open" id="subNoticeOverlay">
+<div class="modal" style="max-width:460px">
+    <h3>📢 管理员通知</h3>
+    <div style="font-size:14px;line-height:1.8;white-space:pre-wrap;max-height:50vh;overflow-y:auto"><?=h($subNoticeContent)?></div>
+    <div class="modal-footer"><button class="btn btn-primary" onclick="closeOverlay('subNoticeOverlay')">我知道了</button></div>
+</div></div>
+<?php endif; ?>
+
 <script>
 // ── 响应式布局 ──
 function applyLayout(){
@@ -535,10 +639,21 @@ function openEditModal(btn){
         const map={id:'e_id',platform_part_no:'e_ppn',customer_part_no:'e_cpn',
             model:'e_model',brand:'e_brand',product_name:'e_pname',
             package:'e_pkg',product_type:'e_ptype',location:'e_loc',
-            low_stock_threshold:'e_thr',remark:'e_rem'};
+            low_stock_threshold:'e_thr',remark:'e_rem',alternatives:'e_alts'};
         for(const[k,eid] of Object.entries(map)){
             const el=document.getElementById(eid);
             if(el) el.value=d[k]??'';
+        }
+        // 显示生效阈值提示（三级优先级：单品 > 分类 > 全局）
+        const hint=document.getElementById('e_thr_hint');
+        if(hint){
+            const eff=d.eff_threshold;
+            const own=d.low_stock_threshold;
+            if(own===null||own===undefined||own===''){
+                hint.textContent='当前生效: '+eff+'（继承中）';
+            }else{
+                hint.textContent='当前生效: '+eff;
+            }
         }
         document.getElementById('modalEdit').classList.add('open');
     }catch(e){console.error('编辑数据解析失败',e);}
@@ -629,17 +744,17 @@ function toggleCats(){
     catExpanded=!catExpanded;
     const p=document.getElementById('catPills');
     const b=document.getElementById('catToggle');
-    p.style.maxHeight=catExpanded?p.scrollHeight+'px':'30px';
-    b.textContent=catExpanded?'▲ 收起':'▼ 展开';
+    p.style.maxHeight=catExpanded?p.scrollHeight+'px':'36px';
+    if(b) b.textContent=catExpanded?'▲':'▼';
 }
 window.addEventListener('load',()=>{
     const active=document.querySelector('#catPills .pill.active');
-    if(active&&active.offsetTop>30){
+    if(active&&active.offsetTop>36){
         catExpanded=true;
         const p=document.getElementById('catPills');
         p.style.maxHeight=p.scrollHeight+'px';
         const b=document.getElementById('catToggle');
-        if(b) b.textContent='▲ 收起';
+        if(b) b.textContent='▲';
     }
 });
 
@@ -647,6 +762,28 @@ window.addEventListener('load',()=>{
 document.getElementById('searchInput').addEventListener('keydown',function(e){
     if(e.key==='Enter'){e.preventDefault();document.getElementById('searchForm').submit();}
 });
+
+// ── 清空搜索框 ──
+function clearSearch(){
+    var input = document.getElementById('searchInput');
+    input.value = '';
+    // 保留当前筛选条件，仅清除搜索词
+    var params = new URLSearchParams(window.location.search);
+    params.delete('q');
+    var qs = params.toString();
+    window.location.href = qs ? '?' + qs : 'index.php';
+}
+// 输入框内容变化时动态显示/隐藏清空按钮
+(function(){
+    var input = document.getElementById('searchInput');
+    var btn = document.getElementById('clearSearchBtn');
+    if (!input || !btn) return;
+    // 初始状态
+    btn.style.display = input.value.trim() !== '' ? '' : 'none';
+    input.addEventListener('input', function(){
+        btn.style.display = this.value.trim() !== '' ? '' : 'none';
+    });
+})();
 
 // ── 批量操作 ──
 function toggleSelectAll(el){
@@ -712,6 +849,14 @@ function batchSetLocation(){
     container.innerHTML='';
     ids.forEach(id=>{container.innerHTML+='<input type="hidden" name="ids[]" value="'+id+'">';});
     document.getElementById('modalBatchLoc').classList.add('open');
+}
+function batchSetRemark(){
+    const ids=getSelectedIds();
+    if(ids.length===0) return;
+    const container=document.getElementById('batchRemIds');
+    container.innerHTML='';
+    ids.forEach(id=>{container.innerHTML+='<input type="hidden" name="ids[]" value="'+id+'">';});
+    document.getElementById('modalBatchRem').classList.add('open');
 }
 
 // ── 打印标签 ──

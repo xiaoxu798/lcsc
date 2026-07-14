@@ -41,7 +41,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $flashType = 'err';
             }
         }
-        adminLog($uid, '修改系统设置');
+        $siteTitleVal  = trim($_POST['site_title'] ?? '');
+        $themeVal      = trim($_POST['theme_default'] ?? '');
+        $regModeVal    = trim($_POST['register_mode'] ?? '');
+        $thresholdVal  = trim($_POST['default_low_stock'] ?? '');
+        $timeoutVal    = trim($_POST['session_timeout'] ?? '');
+        adminLog($uid, '修改系统设置', "标题:{$siteTitleVal} 主题:{$themeVal} 注册:{$regModeVal} 阈值:{$thresholdVal} 超时:{$timeoutVal}");
         if ($flash === '') { $flash = 'ok_save'; }
     }
 
@@ -50,14 +55,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $platStmt = $db->prepare("SELECT id, code FROM platforms WHERE user_id=?");
         $platStmt->execute([$uid]);
         $platforms = $platStmt->fetchAll();
+        $updatedPlats = [];
         foreach ($platforms as $p) {
             $key = 'url_' . $p['id'];
             if (isset($_POST[$key])) {
                 $db->prepare("UPDATE platforms SET url_template=? WHERE id=?")
                    ->execute([trim($_POST[$key]), $p['id']]);
+                $updatedPlats[] = $p['code'];
             }
         }
-        adminLog($uid, '更新平台URL模板');
+        adminLog($uid, '更新平台URL模板', '平台: ' . implode(', ', $updatedPlats));
         $flash = 'ok_save';
     }
 
@@ -197,18 +204,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             adminLog($uid, '设置默认平台', "id:{$pid}");
             $flash = 'ok_save';
         }
-    }
-
-    // 3. 用户管理 - 修改角色（仅主管理员）
-    elseif ($act === 'user_role') {
-        if (!isPrimaryAdmin()) { header('Location: admin.php?flash=forbidden&ft=err'); exit; }
-        $tid  = (int)($_POST['target_id'] ?? 0);
-        $role = ($_POST['role'] ?? '') === 'admin' ? 'admin' : 'user';
-        if ($tid !== $uid && $tid > 0) {
-            $db->prepare("UPDATE users SET role=? WHERE id=?")->execute([$role, $tid]);
-            adminLog($uid, '修改用户角色', "uid:{$tid} role:{$role}");
-        }
-        $flash = 'ok_save';
     }
 
     // 3. 用户管理 - 重置密码（主管理员可重置任何人，普通管理员仅可重置自己的子用户）
@@ -481,13 +476,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // 6. 普通管理员全局配置（阈值/公告/改密跳转）
+    elseif ($act === 'save_user_config') {
+        $thresh = max(0, intval($_POST['default_low_stock'] ?? 10));
+        setUserSetting($uid, 'default_low_stock', (string)$thresh);
+        $subNotice = trim($_POST['sub_notice_content'] ?? '');
+        $subNoticeMode = trim($_POST['sub_notice_mode'] ?? 'off');
+        setUserSetting($uid, 'sub_notice_content', $subNotice);
+        setUserSetting($uid, 'sub_notice_mode', $subNoticeMode);
+        adminLog($uid, '保存全局配置', "阈值:{$thresh} 公告模式:{$subNoticeMode}");
+        $flash = 'ok_save';
+    }
+
     // Redirect to clear POST (except for backup which exits)
     $tabParam = '';
     if (in_array($act, ['save_settings'], true)) $tabParam = '#tab-settings';
     elseif (in_array($act, ['save_platforms', 'add_platform', 'edit_platform', 'delete_platform', 'set_default_platform'], true)) $tabParam = '#tab-platforms';
-    elseif (in_array($act, ['user_role', 'user_reset_pw', 'user_delete', 'create_sub_user', 'delete_sub_user', 'update_sub_user'], true)) $tabParam = '#tab-users';
+    elseif (in_array($act, ['user_reset_pw', 'user_delete', 'create_sub_user', 'delete_sub_user', 'update_sub_user'], true)) $tabParam = '#tab-users';
     elseif (in_array($act, ['gen_invite'], true)) $tabParam = '#tab-invites';
     elseif (in_array($act, ['restore'], true)) $tabParam = '#tab-backup';
+    elseif (in_array($act, ['save_user_config'], true)) $tabParam = '#tab-userconfig';
 
     header('Cache-Control: no-cache, no-store, must-revalidate');
     header('Pragma: no-cache');
@@ -526,6 +534,70 @@ $adminLogs = $db->prepare("SELECT al.*, u.username FROM admin_log al LEFT JOIN u
 $adminLogs->execute([$uid]);
 $adminLogs = $adminLogs->fetchAll();
 
+// ── 系统监控数据（仅超级管理员）──
+$monitorData = null;
+if (isPrimaryAdmin()) {
+    $today = date('Y-m-d');
+    // 今日访问统计
+    $visStmt = $db->prepare("SELECT * FROM daily_stats WHERE stat_date=?");
+    $visStmt->execute([$today]);
+    $todayStats = $visStmt->fetch() ?: ['total_visits' => 0, 'unique_ips' => 0];
+    // 近7天访问趋势
+    $trendStmt = $db->query("SELECT stat_date, total_visits, unique_ips FROM daily_stats WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) ORDER BY stat_date ASC");
+    $visitTrend = $trendStmt->fetchAll();
+    // 在线用户（5分钟内活动）
+    $onlineStmt = $db->query("SELECT id, username, role, last_activity FROM users WHERE last_activity IS NOT NULL AND last_activity > NOW() - INTERVAL 5 MINUTE ORDER BY last_activity DESC");
+    $onlineUsers = $onlineStmt->fetchAll();
+    // 登录记录分页
+    $logPage = max(1, intval($_GET['log_page'] ?? 1));
+    $logPerPage = 20;
+    $logCountStmt = $db->query("SELECT COUNT(*) FROM login_attempts");
+    $logTotal = (int)$logCountStmt->fetchColumn();
+    $logTotalPage = max(1, ceil($logTotal / $logPerPage));
+    $logPage = min($logPage, $logTotalPage);
+    $logOffset = ($logPage - 1) * $logPerPage;
+    $loginStmt = $db->prepare("SELECT la.*, u.username FROM login_attempts la LEFT JOIN users u ON u.username=la.username ORDER BY la.created_at DESC LIMIT $logPerPage OFFSET $logOffset");
+    $loginStmt->execute();
+    $loginLogs = $loginStmt->fetchAll();
+    // 今日登录成功/失败统计
+    $loginStatsStmt = $db->prepare("SELECT
+        SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS fail_count,
+        COUNT(DISTINCT username) AS unique_users,
+        COUNT(DISTINCT ip) AS unique_ips_today
+        FROM login_attempts WHERE DATE(created_at)=?");
+    $loginStatsStmt->execute([$today]);
+    $loginStats = $loginStatsStmt->fetch() ?: ['success_count'=>0,'fail_count'=>0,'unique_users'=>0,'unique_ips_today'=>0];
+    // 近30天总访问量
+    $monthStatsStmt = $db->query("SELECT SUM(total_visits) AS month_visits, SUM(unique_ips) AS month_ips FROM daily_stats WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)");
+    $monthStats = $monthStatsStmt->fetch() ?: ['month_visits'=>0,'month_ips'=>0];
+    // 最活跃用户（近7天登录次数）
+    $activeUsersStmt = $db->query("SELECT username, COUNT(*) AS login_count, MAX(created_at) AS last_login FROM login_attempts WHERE success=1 AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) GROUP BY username ORDER BY login_count DESC LIMIT 5");
+    $activeUsers = $activeUsersStmt->fetchAll();
+    // 服务器信息
+    $mysqlVer = $db->query("SELECT VERSION()")->fetchColumn() ?: '未知';
+    $serverInfo = [
+        'php'     => phpversion(),
+        'server'  => $_SERVER['SERVER_SOFTWARE'] ?? 'CLI',
+        'mysql'   => $mysqlVer,
+        'os'      => php_uname('s') . ' ' . php_uname('r'),
+        'max_upload' => ini_get('upload_max_filesize') ?: '未知',
+        'max_post'   => ini_get('post_max_size') ?: '未知',
+        'memory'   => ini_get('memory_limit') ?: '未知',
+    ];
+    $monitorData = compact('todayStats', 'visitTrend', 'onlineUsers', 'loginLogs', 'serverInfo', 'loginStats', 'monthStats', 'activeUsers', 'logPage', 'logTotalPage', 'logTotal');
+}
+
+// ── 普通管理员全局配置 ──
+$userConfig = null;
+if (!isPrimaryAdmin()) {
+    $userConfig = [
+        'threshold'   => getUserSetting($uid, 'default_low_stock', ''),
+        'notice_content' => getUserSetting($uid, 'sub_notice_content', ''),
+        'notice_mode'    => getUserSetting($uid, 'sub_notice_mode', 'off'),
+    ];
+}
+
 $pageTitle  = '后台管理';
 $activePage = 'admin';
 require 'layout_head.php';
@@ -536,26 +608,10 @@ require 'layout_head.php';
 .admin-tab{padding:9px 18px;border-radius:8px 8px 0 0;font-size:13px;cursor:pointer;color:var(--text2);background:transparent;border:none;transition:all .15s;white-space:nowrap;position:relative;bottom:-2px;border-bottom:2px solid transparent;}
 .admin-tab:hover{color:var(--text);background:var(--surface2);}
 .admin-tab.active{color:var(--accent);background:var(--accent-dim);border-bottom-color:var(--accent);}
-.admin-panel{display:none;}
-.admin-panel.active{display:block;}
-.admin-section{margin-bottom:20px;}
-.admin-section .card-pad{margin-bottom:16px;}
-.admin-grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
-@media(max-width:768px){.admin-grid2{grid-template-columns:1fr;}}
+.admin-panel{display:none;max-width:100%;}
+.admin-panel.active{display:block;max-width:100%;}
 .backup-info{font-size:13px;color:var(--text2);margin-bottom:14px;line-height:1.8;}
 .backup-info code{background:var(--surface2);padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent);}
-.log-row{display:grid;grid-template-columns:130px 90px 110px 1fr 120px;gap:10px;padding:8px 0;border-top:1px solid var(--border);font-size:12px;align-items:flex-start;}
-.log-header{display:grid;grid-template-columns:130px 90px 110px 1fr 120px;gap:10px;padding:8px 0;border-bottom:2px solid var(--border);font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;}
-.log-time{color:var(--text3);white-space:nowrap;}
-.log-user{color:var(--accent);}
-.log-action{}
-.log-detail{color:var(--text2);word-break:break-all;min-width:0;}
-.log-ip{color:var(--text3);font-family:'JetBrains Mono',monospace;font-size:11px;text-align:right;white-space:nowrap;}
-@media(max-width:600px){
-  .log-row,.log-header{grid-template-columns:1fr;gap:2px;}
-  .log-ip{text-align:left;}
-  .log-header{display:none;}
-}
 </style>
 
 <div class="main">
@@ -618,8 +674,10 @@ if ($flash !== '') {
     <button class="admin-tab" data-tab="tab-platforms">🔗 平台URL</button>
     <button class="admin-tab" data-tab="tab-users">👥 用户管理</button>
     <button class="admin-tab" data-tab="tab-invites">🎫 邀请码</button>
+    <button class="admin-tab" data-tab="tab-monitor">📊 系统监控</button>
 <?php else: ?>
-    <button class="admin-tab active" data-tab="tab-platforms">🔗 平台URL</button>
+    <button class="admin-tab active" data-tab="tab-userconfig">⚙️ 全局配置</button>
+    <button class="admin-tab" data-tab="tab-platforms">🔗 平台URL</button>
     <button class="admin-tab" data-tab="tab-subusers">👤 子用户</button>
 <?php endif; ?>
     <button class="admin-tab" data-tab="tab-backup">💾 数据备份</button>
@@ -656,9 +714,9 @@ if ($flash !== '') {
         <option value="light" <?=$settings['theme_default']==='light'?'selected':''?>>亮色 (Light)</option>
     </select>
 </div>
-<div class="form-group"><label>默认低库存阈值</label>
+<div class="form-group"><label>默认低库存阈值（全局）</label>
     <input name="default_low_stock" type="number" min="0" value="<?=h($settings['default_low_stock'])?>">
-    <div class="form-hint">新导入元件的默认低库存告警数量</div>
+    <div class="form-hint">全局最低优先级阈值（优先级：单品 &gt; 分类 &gt; 全局）</div>
 </div>
 </div>
 
@@ -698,7 +756,7 @@ if ($flash !== '') {
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- 2. 平台管理（增删改） -->
 <!-- ═══════════════════════════════════════════════════════ -->
-<div class="admin-panel<?= isPrimaryAdmin() ? '' : ' active' ?>" id="tab-platforms">
+<div class="admin-panel" id="tab-platforms">
 <div class="card card-pad">
 <div class="sec-title">平台管理</div>
 <p class="backup-info">
@@ -783,6 +841,25 @@ if ($flash !== '') {
 </div>
 </div>
 
+<?php
+// 权限标签和解析函数（子用户管理使用）
+$permLabels = [
+    'can_edit'              => '编辑物料',
+    'can_delete'            => '删除物料',
+    'can_import'            => '导入订单',
+    'can_manage_categories' => '管理分类',
+    'can_batch'             => '批量操作',
+    'can_export'            => '导出数据',
+    'can_scan'              => '扫码出入库',
+    'can_print'             => '打印标签',
+];
+function parsePerms(?string $json): array {
+    if (!$json) return [];
+    $arr = json_decode($json, true);
+    return is_array($arr) ? $arr : [];
+}
+?>
+
 <?php if(isPrimaryAdmin()): ?>
 <!-- ═══════════════════════════════════════════════════════ -->
 <!-- 3. 用户管理 -->
@@ -848,39 +925,14 @@ if ($flash !== '') {
 </tbody>
 </table>
 </div>
-<?php endif; // 主管理员专有内容结束 ?>
 
-<!-- ═══════════════════════════════════════════════════════ -->
-<!-- 子用户管理（所有管理员可见） -->
-<!-- ═══════════════════════════════════════════════════════ -->
-<?php if(!isPrimaryAdmin()): ?>
-<div class="admin-panel" id="tab-subusers">
-<?php endif; ?>
-<div class="card card-pad" style="margin-top:16px">
+<!-- 子用户管理区域（嵌入用户管理标签页） -->
+<div style="border-top:1px solid var(--border);margin-top:20px;padding-top:16px">
 <div class="sec-title">👤 子用户管理（共享物料库，可自定义权限）</div>
 <p class="backup-info">
-    子用户登录后共享您的全部物料数据。您可以为每个子用户单独设置权限，不勾选则仅能查看+扫码。<br>
+    子用户登录后共享您的全部物料数据。新建子用户默认拥有编辑/扫码/打印/导出权限，您可随时点击"⚙ 权限"按钮调整。<br>
     多人共用一套物料时，只需创建子用户，无需每人注册独立账号。
 </p>
-
-<?php
-$permLabels = [
-    'can_edit'              => '编辑物料',
-    'can_delete'            => '删除物料',
-    'can_import'            => '导入订单',
-    'can_manage_categories' => '管理分类',
-    'can_batch'             => '批量操作',
-    'can_export'            => '导出数据',
-    'can_scan'              => '扫码出入库',
-    'can_print'             => '打印标签',
-];
-
-function parsePerms(?string $json): array {
-    if (!$json) return [];
-    $arr = json_decode($json, true);
-    return is_array($arr) ? $arr : [];
-}
-?>
 
 <?php if ($subUsers): ?>
 <div class="table-wrap" style="margin-bottom:12px">
@@ -902,7 +954,7 @@ function parsePerms(?string $json): array {
     </td>
     <td style="font-size:11px;">
         <?php if (empty($suPerms)): ?>
-        <span style="color:var(--text2)">仅查看+扫码</span>
+        <span style="color:var(--text2)">仅查看</span>
         <?php else: ?>
         <?php foreach ($permLabels as $pk => $pl): if (in_array($pk, $suPerms)): ?>
         <span class="badge badge-green" style="margin:1px;"><?=$pl?></span>
@@ -954,11 +1006,13 @@ function parsePerms(?string $json): array {
             </div>
         </div>
         <div style="margin-bottom:12px;">
-            <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:6px;">权限设置（不勾选则仅能查看+扫码）：</label>
+            <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:6px;">权限设置（已按常用功能预选默认权限，可调整）：</label>
             <div style="display:flex;flex-wrap:wrap;gap:8px;">
-                <?php foreach ($permLabels as $pk => $pl): ?>
+                <?php
+                $defaultPerms = ['can_edit', 'can_scan', 'can_print', 'can_export'];
+                foreach ($permLabels as $pk => $pl): ?>
                 <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer;">
-                    <input type="checkbox" name="sub_perms[]" value="<?=$pk?>" style="accent-color:var(--accent);"> <?=$pl?>
+                    <input type="checkbox" name="sub_perms[]" value="<?=$pk?>" <?=in_array($pk, $defaultPerms, true) ? 'checked' : ''?> style="accent-color:var(--accent);"> <?=$pl?>
                 </label>
                 <?php endforeach; ?>
             </div>
@@ -967,7 +1021,110 @@ function parsePerms(?string $json): array {
     </form>
 </div>
 </div>
+
+</div>
+</div>
+<?php endif; // 主管理员专有内容结束 ?>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 子用户管理（仅普通管理员，独立面板） -->
+<!-- ═══════════════════════════════════════════════════════ -->
 <?php if(!isPrimaryAdmin()): ?>
+<div class="admin-panel" id="tab-subusers">
+<div class="card card-pad">
+<div class="sec-title">👤 子用户管理（共享物料库，可自定义权限）</div>
+<p class="backup-info">
+    子用户登录后共享您的全部物料数据。新建子用户默认拥有编辑/扫码/打印/导出权限，您可随时点击"⚙ 权限"按钮调整。<br>
+    多人共用一套物料时，只需创建子用户，无需每人注册独立账号。
+</p>
+
+<?php if ($subUsers): ?>
+<div class="table-wrap" style="margin-bottom:12px">
+<table>
+<thead><tr>
+    <th>用户名</th>
+    <th>权限</th>
+    <th>创建时间</th>
+    <th>最近登录</th>
+    <th>操作</th>
+</tr></thead>
+<tbody>
+<?php foreach ($subUsers as $su):
+    $suPerms = parsePerms($su['permissions'] ?? null);
+?>
+<tr>
+    <td><?=h($su['username'])?>
+        <?php if ($su['must_change_pw']) echo '<span class="badge badge-yellow" style="margin-left:4px">需改密</span>'; ?>
+    </td>
+    <td style="font-size:11px;">
+        <?php if (empty($suPerms)): ?>
+        <span style="color:var(--text2)">仅查看</span>
+        <?php else: ?>
+        <?php foreach ($permLabels as $pk => $pl): if (in_array($pk, $suPerms)): ?>
+        <span class="badge badge-green" style="margin:1px;"><?=$pl?></span>
+        <?php endif; endforeach; ?>
+        <?php endif; ?>
+    </td>
+    <td style="font-size:12px;color:var(--text2)"><?=h(substr((string)$su['created_at'], 0, 10))?></td>
+    <td style="font-size:12px;color:var(--text2)"><?=h(substr((string)($su['last_login'] ?? '—'), 0, 10))?></td>
+    <td class="td-actions">
+        <div class="actions">
+            <button type="button" class="btn btn-ghost btn-xs sub-perm-btn"
+                    data-id="<?=$su['id']?>"
+                    data-username="<?=h($su['username'])?>"
+                    data-perms="<?=h(json_encode($suPerms, JSON_UNESCAPED_UNICODE))?>">⚙ 权限</button>
+            <form method="post" style="display:inline">
+                <input type="hidden" name="action" value="user_reset_pw">
+                <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+                <input type="hidden" name="target_id" value="<?=$su['id']?>">
+                <button type="submit" class="btn btn-ghost btn-xs" onclick="return confirm('确认重置密码？')">密码</button>
+            </form>
+            <form method="post" style="display:inline" class="sub-delete-form" data-username="<?=h($su['username'])?>">
+                <input type="hidden" name="action" value="delete_sub_user">
+                <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+                <input type="hidden" name="target_id" value="<?=$su['id']?>">
+                <button type="submit" class="btn btn-danger btn-xs">删除</button>
+            </form>
+        </div>
+    </td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+</div>
+<?php endif; ?>
+
+<div style="border:1px dashed var(--border);border-radius:8px;padding:16px;background:var(--surface2);">
+    <h4 style="font-size:13px;margin-bottom:12px;">➕ 创建子用户</h4>
+    <form method="post" id="createSubForm">
+        <input type="hidden" name="action" value="create_sub_user">
+        <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+        <div class="form-row">
+            <div class="form-group">
+                <label>用户名 *（至少3位）</label>
+                <input name="sub_username" placeholder="worker1" required>
+            </div>
+            <div class="form-group">
+                <label>密码 *（至少6位）</label>
+                <input name="sub_password" type="password" placeholder="••••••" required>
+            </div>
+        </div>
+        <div style="margin-bottom:12px;">
+            <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:6px;">权限设置（已按常用功能预选默认权限，可调整）：</label>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                <?php
+                $defaultPerms = ['can_edit', 'can_scan', 'can_print', 'can_export'];
+                foreach ($permLabels as $pk => $pl): ?>
+                <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer;">
+                    <input type="checkbox" name="sub_perms[]" value="<?=$pk?>" <?=in_array($pk, $defaultPerms, true) ? 'checked' : ''?> style="accent-color:var(--accent);"> <?=$pl?>
+                </label>
+                <?php endforeach; ?>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm">创建子用户</button>
+    </form>
+</div>
+</div>
 </div><!-- /tab-subusers -->
 <?php endif; ?>
 
@@ -1017,8 +1174,6 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
     if (e.target === this) closeSubPermModal();
 });
 </script>
-</div>
-</div>
 
 <?php if(isPrimaryAdmin()): ?>
 <!-- ═══════════════════════════════════════════════════════ -->
@@ -1071,51 +1226,261 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
 </div>
 <?php endif; // 主管理员专有内容结束 ?>
 
+<?php if(isPrimaryAdmin() && $monitorData): ?>
 <!-- ═══════════════════════════════════════════════════════ -->
-<!-- 5. 数据备份 -->
+<!-- 4b. 系统监控（仅超级管理员） -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="admin-panel" id="tab-monitor">
+<div class="page-header"><h2>系统监控面板</h2></div>
+
+<!-- 今日统计卡片 -->
+<div class="grid-4 stats-row mb-3">
+    <div class="stat-card c-blue"><div class="stat-label">今日访问次数</div><div class="stat-value"><?=number_format((int)$monitorData['todayStats']['total_visits'])?></div></div>
+    <div class="stat-card c-green"><div class="stat-label">今日独立IP</div><div class="stat-value"><?=number_format((int)$monitorData['todayStats']['unique_ips'])?></div></div>
+    <div class="stat-card c-purple"><div class="stat-label">在线用户</div><div class="stat-value"><?=count($monitorData['onlineUsers'])?></div></div>
+    <div class="stat-card c-yellow"><div class="stat-label">注册用户总数</div><div class="stat-value"><?=count($users)?></div></div>
+</div>
+<div class="grid-4 stats-row mb-3">
+    <div class="stat-card c-green"><div class="stat-label">今日登录成功</div><div class="stat-value"><?=number_format((int)$monitorData['loginStats']['success_count'])?></div></div>
+    <div class="stat-card c-red"><div class="stat-label">今日登录失败</div><div class="stat-value"><?=number_format((int)$monitorData['loginStats']['fail_count'])?></div></div>
+    <div class="stat-card c-blue"><div class="stat-label">近30天总访问</div><div class="stat-value"><?=number_format((int)$monitorData['monthStats']['month_visits'])?></div></div>
+    <div class="stat-card c-purple"><div class="stat-label">今日活跃用户</div><div class="stat-value"><?=number_format((int)$monitorData['loginStats']['unique_users'])?></div></div>
+</div>
+
+<!-- 在线用户 -->
+<div class="card card-pad mb-3">
+<div class="sec-title">👥 在线用户（5分钟内活动）</div>
+<?php if ($monitorData['onlineUsers']): ?>
+<div class="table-wrap">
+<table>
+<thead><tr><th>用户名</th><th>角色</th><th>最后活动时间</th></tr></thead>
+<tbody>
+<?php foreach ($monitorData['onlineUsers'] as $ou): ?>
+<tr>
+    <td style="font-size:13px"><?=h($ou['username'])?></td>
+    <td><span class="badge <?= $ou['role']==='admin'?'badge-blue':'badge-green' ?>"><?= $ou['role']==='admin'?'管理员':'子用户' ?></span></td>
+    <td style="font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace"><?=h(substr((string)$ou['last_activity'],0,19))?></td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+</div>
+<?php else: ?>
+<div class="empty-state"><div class="icon">💤</div>当前无在线用户</div>
+<?php endif; ?>
+</div>
+
+<!-- 登录记录 -->
+<div class="card card-pad mb-3">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div class="sec-title" style="margin:0">🔐 登录记录（共 <?=$monitorData['logTotal']?> 条）</div>
+    <?php if ($monitorData['loginLogs']): ?>
+    <div style="display:flex;gap:8px">
+        <button type="button" class="btn btn-ghost btn-sm" id="logBatchBtn" onclick="toggleLogBatch()">☑ 批量选择</button>
+        <button type="button" class="btn btn-danger btn-sm" id="logBatchDeleteBtn" style="display:none" onclick="document.getElementById('logBatchForm').submit()">🗑 删除选中</button>
+    </div>
+    <?php endif; ?>
+</div>
+<?php if ($monitorData['loginLogs']): ?>
+<form method="post" action="action.php" id="logBatchForm" onsubmit="return confirm('确认删除选中的记录？')">
+<input type="hidden" name="action" value="batch_delete_login_logs">
+<input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+<div class="table-wrap">
+<table>
+<thead><tr>
+    <th id="thLogCheckbox" style="display:none;width:30px;"><input type="checkbox" id="selectAllLogs" onchange="document.querySelectorAll('.logCheckbox').forEach(c=>c.checked=this.checked)"></th>
+    <th>时间</th><th>用户名</th><th>IP</th><th>结果</th><th id="thLogAction" style="display:none;width:60px">操作</th>
+</tr></thead>
+<tbody>
+<?php foreach ($monitorData['loginLogs'] as $ll): ?>
+<tr>
+    <td class="tdLogCheckbox" style="display:none;text-align:center"><input type="checkbox" name="log_ids[]" value="<?=$ll['id']?>" class="logCheckbox"></td>
+    <td style="font-size:12px;color:var(--text2)"><?=h(substr((string)$ll['created_at'],0,16))?></td>
+    <td style="font-size:13px"><?=h($ll['username'])?></td>
+    <td style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text3)"><?=h($ll['ip'])?></td>
+    <td><?= $ll['success'] ? '<span class="badge badge-green">成功</span>' : '<span class="badge badge-red">失败</span>' ?></td>
+    <td class="tdLogAction" style="display:none;text-align:center">
+        <button type="button" class="btn btn-danger btn-xs" onclick="deleteLoginLog(<?=$ll['id']?>)">✕</button>
+    </td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+</div>
+</form>
+<!-- 分页 -->
+<?php if ($monitorData['logTotalPage'] > 1): ?>
+<div class="pagination" style="margin-top:12px">
+    <a href="?log_page=<?=$monitorData['logPage']-1?>#tab-monitor" class="page-btn <?=$monitorData['logPage']<=1?'disabled':''?>">‹</a>
+    <?php
+    $ls = max(1, $monitorData['logPage']-2); $le = min($monitorData['logTotalPage'], $monitorData['logPage']+2);
+    if($ls>1) echo '<a href="?log_page=1#tab-monitor" class="page-btn">1</a>';
+    if($ls>2) echo '<span class="page-info">…</span>';
+    for($i=$ls;$i<=$le;$i++) echo '<a href="?log_page='.$i.'#tab-monitor" class="page-btn '.($i===$monitorData['logPage']?'active':'').'">'.$i.'</a>';
+    if($le<$monitorData['logTotalPage']-1) echo '<span class="page-info">…</span>';
+    if($le<$monitorData['logTotalPage']) echo '<a href="?log_page='.$monitorData['logTotalPage'].'#tab-monitor" class="page-btn">'.$monitorData['logTotalPage'].'</a>';
+    ?>
+    <a href="?log_page=<?=$monitorData['logPage']+1?>#tab-monitor" class="page-btn <?=$monitorData['logPage']>=$monitorData['logTotalPage']?'disabled':''?>">›</a>
+    <span class="page-info">第 <?=$monitorData['logPage']?> / <?=$monitorData['logTotalPage']?> 页</span>
+</div>
+<?php endif; ?>
+<?php else: ?>
+<div class="empty-state"><div class="icon">📋</div>暂无登录记录</div>
+<?php endif; ?>
+</div>
+
+<!-- 最活跃用户 -->
+<?php if ($monitorData['activeUsers']): ?>
+<div class="card card-pad mb-3">
+<div class="sec-title">🏆 近7天最活跃用户</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>排名</th><th>用户名</th><th>登录次数</th><th>最近登录</th></tr></thead>
+<tbody>
+<?php foreach ($monitorData['activeUsers'] as $i => $au): ?>
+<tr>
+    <td style="font-size:13px;font-weight:600;color:var(--accent)"><?=$i+1?></td>
+    <td style="font-size:13px"><?=h($au['username'])?></td>
+    <td><span class="badge badge-green"><?=number_format((int)$au['login_count'])?> 次</span></td>
+    <td style="font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace"><?=h(substr((string)$au['last_login'],0,16))?></td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+</div>
+</div>
+<?php endif; ?>
+
+<script>
+function toggleLogBatch(){
+    var mode = document.getElementById('thLogCheckbox').style.display === 'none';
+    document.getElementById('thLogCheckbox').style.display = mode ? 'table-cell' : 'none';
+    document.getElementById('thLogAction').style.display = mode ? 'table-cell' : 'none';
+    document.getElementById('logBatchBtn').textContent = mode ? '☑ 取消批量' : '☑ 批量选择';
+    document.getElementById('logBatchDeleteBtn').style.display = mode ? 'inline-flex' : 'none';
+    document.querySelectorAll('.tdLogCheckbox, .tdLogAction').forEach(function(td){
+        td.style.display = mode ? 'table-cell' : 'none';
+    });
+}
+function deleteLoginLog(id){
+    if(!confirm('确认删除该条记录？')) return;
+    var f = document.createElement('form');
+    f.method = 'post';
+    f.action = 'action.php';
+    f.innerHTML = '<input type="hidden" name="action" value="delete_login_log"><input type="hidden" name="_csrf" value="<?=h(csrf())?>"><input type="hidden" name="log_id" value="'+id+'">';
+    document.body.appendChild(f);
+    f.submit();
+}
+</script>
+
+<!-- 近7天访问趋势 -->
+<div class="card card-pad mb-3">
+<div class="sec-title">📈 近7天访问趋势</div>
+<?php if ($monitorData['visitTrend']): ?>
+<div class="table-wrap">
+<table>
+<thead><tr><th>日期</th><th>总访问</th><th>独立IP</th></tr></thead>
+<tbody>
+<?php foreach ($monitorData['visitTrend'] as $vt): ?>
+<tr>
+    <td style="font-size:13px;font-family:'JetBrains Mono',monospace"><?=h($vt['stat_date'])?></td>
+    <td style="font-size:13px"><?=number_format((int)$vt['total_visits'])?></td>
+    <td style="font-size:13px"><?=number_format((int)$vt['unique_ips'])?></td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+</div>
+<?php else: ?>
+<div class="empty-state"><div class="icon">📊</div>暂无访问数据</div>
+<?php endif; ?>
+</div>
+
+<!-- 服务器配置 -->
+<div class="card card-pad">
+<div class="sec-title">🖥️ 服务器配置</div>
+<table>
+<tbody>
+<tr><td style="color:var(--text2);width:140px">PHP 版本</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['php'])?></td></tr>
+<tr><td style="color:var(--text2)">Web Server</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['server'])?></td></tr>
+<tr><td style="color:var(--text2)">MySQL 版本</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['mysql'])?></td></tr>
+<tr><td style="color:var(--text2)">操作系统</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['os'])?></td></tr>
+<tr><td style="color:var(--text2)">最大上传</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['max_upload'])?></td></tr>
+<tr><td style="color:var(--text2)">最大POST</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['max_post'])?></td></tr>
+<tr><td style="color:var(--text2)">内存限制</td><td style="font-family:'JetBrains Mono',monospace"><?=h($monitorData['serverInfo']['memory'])?></td></tr>
+</tbody>
+</table>
+</div>
+</div>
+<?php endif; ?>
+
+<?php if(!isPrimaryAdmin() && $userConfig): ?>
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 0. 普通管理员全局配置（与超管 tab-settings 同模板） -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="admin-panel active" id="tab-userconfig">
+<div class="card card-pad">
+<div class="sec-title">全局配置</div>
+<form method="post">
+<input type="hidden" name="action" value="save_user_config">
+<input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+
+<div class="form-row">
+<div class="form-group"><label>默认低库存阈值</label>
+    <input name="default_low_stock" type="number" min="0" value="<?=h($userConfig['threshold'] !== '' ? $userConfig['threshold'] : '10')?>">
+    <div class="form-hint">新导入元件的默认低库存告警数量（优先级：单品 &gt; 分类 &gt; 全局）</div>
+</div>
+<div class="form-group"><label>公告显示模式</label>
+    <select name="sub_notice_mode">
+        <option value="off"    <?=$userConfig['notice_mode']==='off'?'selected':''?>>不显示</option>
+        <option value="always" <?=$userConfig['notice_mode']==='always'?'selected':''?>>每次弹出</option>
+        <option value="once"   <?=$userConfig['notice_mode']==='once'?'selected':''?>>仅一次</option>
+    </select>
+</div>
+</div>
+
+<div class="form-group"><label>子用户公告</label>
+    <textarea name="sub_notice_content" rows="5" placeholder="留空则不显示公告"><?=h($userConfig['notice_content'])?></textarea>
+</div>
+
+<div style="display:flex;gap:8px;">
+<button type="submit" class="btn btn-primary">💾 保存配置</button>
+<a href="change_password.php" class="btn btn-ghost">🔐 修改密码</a>
+</div>
+</form>
+</div>
+</div>
+<?php endif; ?>
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 5. 数据备份（与超管 tab-settings 同模板） -->
 <!-- ═══════════════════════════════════════════════════════ -->
 <div class="admin-panel" id="tab-backup">
-<div class="admin-grid2">
-
-<!-- 下载备份 -->
 <div class="card card-pad">
-<div class="sec-title">📥 下载备份</div>
-<p class="backup-info">
-    将当前用户的所有数据导出为 SQL 文件，可直接下载保存。<br>
-    包含所有表结构及数据，用户相关数据仅导出当前用户的内容。
-</p>
+<div class="sec-title">数据备份</div>
+<div class="grid-2" style="margin-bottom:16px">
+<div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--surface2)">
+<h4 style="font-size:13px;margin-bottom:10px">📥 下载备份</h4>
 <form method="post">
-    <input type="hidden" name="action" value="backup">
-    <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
-    <button type="submit" class="btn btn-primary btn-full">📥 生成并下载备份</button>
+<input type="hidden" name="action" value="backup">
+<input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+<div class="form-hint" style="margin-bottom:12px">将当前用户的所有数据导出为 SQL 文件，包含全部表结构及数据。</div>
+<button type="submit" class="btn btn-primary">📥 生成并下载备份</button>
 </form>
 </div>
-
-<!-- 恢复备份 -->
-<div class="card card-pad">
-<div class="sec-title">📤 恢复备份</div>
-<p class="backup-info">
-    上传之前导出的 <code>.sql</code> 备份文件，将数据恢复到当前系统。<br>
-    <span style="color:var(--yellow)">⚠ 注意：恢复操作会覆盖现有数据，请谨慎操作。</span>
-</p>
+<div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--surface2)">
+<h4 style="font-size:13px;margin-bottom:10px">📤 恢复备份</h4>
 <form method="post" enctype="multipart/form-data">
-    <input type="hidden" name="action" value="restore">
-    <input type="hidden" name="_csrf" value="<?=h(csrf())?>">
-    <div class="form-group">
-        <label>选择备份文件 (.sql)</label>
-        <input type="file" name="backup_file" accept=".sql" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:7px;font-size:13px;width:100%">
-    </div>
-    <button type="submit" class="btn btn-warning btn-full" onclick="return confirm('确认恢复备份？此操作会覆盖现有数据！')">📤 恢复备份</button>
+<input type="hidden" name="action" value="restore">
+<input type="hidden" name="_csrf" value="<?=h(csrf())?>">
+<input type="file" name="backup_file" accept=".sql" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:7px;font-size:13px;width:100%;margin-bottom:8px">
+<div class="form-hint" style="margin-bottom:12px">上传之前导出的 .sql 备份文件恢复数据（会覆盖现有数据）</div>
+<button type="submit" class="btn btn-warning" onclick="return confirm('确认恢复备份？此操作会覆盖现有数据！')">📤 恢复备份</button>
 </form>
 </div>
-
 </div>
 
-<!-- 备份历史 -->
-<div class="card card-pad" style="margin-top:16px">
-<div class="sec-title">📋 备份/恢复历史</div>
 <?php if ($backupLogs): ?>
-<div class="table-wrap">
+<div class="table-wrap" style="margin-top:16px">
 <table>
 <thead><tr>
     <th style="width:130px">时间</th>
@@ -1151,35 +1516,39 @@ document.getElementById('subPermModal').addEventListener('click', function(e){
 </table>
 </div>
 <?php else: ?>
-<div class="empty-state"><div class="icon">📋</div>暂无备份记录</div>
+<div class="empty-state" style="margin-top:16px"><div class="icon">📋</div>暂无备份记录</div>
 <?php endif; ?>
 </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ -->
-<!-- 6. 操作日志 -->
+<!-- 6. 操作日志（与超管 tab-settings 同模板） -->
 <!-- ═══════════════════════════════════════════════════════ -->
 <div class="admin-panel" id="tab-logs">
 <div class="card card-pad">
 <div class="sec-title">操作日志（最近50条）</div>
 <?php if ($adminLogs): ?>
-<div style="max-height:600px;overflow-y:auto">
-<div class="log-header">
-    <span>时间</span>
-    <span>用户</span>
-    <span>操作</span>
-    <span>详情</span>
-    <span style="text-align:right">IP</span>
-</div>
+<div class="table-wrap" style="max-height:600px;overflow-y:auto">
+<table>
+<thead><tr>
+    <th style="width:130px">时间</th>
+    <th style="width:90px">用户</th>
+    <th style="width:110px">操作</th>
+    <th>详情</th>
+    <th style="width:120px;text-align:right">IP</th>
+</tr></thead>
+<tbody>
 <?php foreach ($adminLogs as $al): ?>
-<div class="log-row">
-    <span class="log-time"><?=h(substr((string)$al['created_at'], 0, 16))?></span>
-    <span class="log-user"><?=h((string)($al['username'] ?? '?'))?></span>
-    <span class="log-action"><?=h($al['action'])?></span>
-    <span class="log-detail"><?=h($al['detail'] ?: '—')?></span>
-    <span class="log-ip"><?=h($al['ip'] ?? '—')?></span>
-</div>
+<tr>
+    <td style="font-size:12px;color:var(--text2);white-space:nowrap"><?=h(substr((string)$al['created_at'], 0, 16))?></td>
+    <td style="font-size:12px;color:var(--accent)"><?=h((string)($al['username'] ?? '?'))?></td>
+    <td style="font-size:12px"><?=h($al['action'])?></td>
+    <td style="font-size:12px;color:var(--text2)"><?=h($al['detail'] ?: '—')?></td>
+    <td style="font-size:11px;color:var(--text3);font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap"><?=h($al['ip'] ?? '—')?></td>
+</tr>
 <?php endforeach; ?>
+</tbody>
+</table>
 </div>
 <?php else: ?>
 <div class="empty-state"><div class="icon">📋</div>暂无操作记录</div>

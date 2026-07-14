@@ -24,10 +24,12 @@ try {
             $ppn   = trim($_POST['platform_part_no'] ?? '');
             $platId= intval($_POST['platform_id'] ?? 1);
             $stock = intval($_POST['stock'] ?? 0);
+            $thrRaw = trim($_POST['low_stock_threshold'] ?? '');
+            $thrVal = $thrRaw === '' ? null : max(0, (int)$thrRaw);
             $db->prepare("INSERT INTO parts (user_id,platform_id,platform_part_no,customer_part_no,model,product_name,product_type,package,brand,stock,low_stock_threshold,location,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
                ->execute([$dataUid,$platId,$ppn,trim($_POST['customer_part_no']??''),trim($_POST['model']??''),
                  trim($_POST['product_name']??''),trim($_POST['product_type']??''),trim($_POST['package']??''),
-                 trim($_POST['brand']??''),$stock,intval($_POST['low_stock_threshold']??10),
+                 trim($_POST['brand']??''),$stock,$thrVal,
                  trim($_POST['location']??''),trim($_POST['remark']??'')]);
             $pid = (int)$db->lastInsertId();
             if ($stock>0) {
@@ -43,11 +45,14 @@ try {
             if (!hasPermission('can_edit')) redirect('index.php');
             $id   = intval($_POST['id']);
             $ptype= trim($_POST['product_type']??'');
-            $db->prepare("UPDATE parts SET platform_part_no=?,customer_part_no=?,model=?,product_name=?,product_type=?,package=?,brand=?,low_stock_threshold=?,location=?,remark=? WHERE id=? AND user_id=?")
+            $alts = trim($_POST['alternatives']??'');
+            $thrRaw = trim($_POST['low_stock_threshold'] ?? '');
+            $thrVal = $thrRaw === '' ? null : max(0, (int)$thrRaw);
+            $db->prepare("UPDATE parts SET platform_part_no=?,customer_part_no=?,model=?,product_name=?,product_type=?,package=?,brand=?,low_stock_threshold=?,location=?,remark=?,alternatives=? WHERE id=? AND user_id=?")
                ->execute([trim($_POST['platform_part_no']??''),trim($_POST['customer_part_no']??''),
                  trim($_POST['model']??''),trim($_POST['product_name']??''),$ptype,trim($_POST['package']??''),
-                 trim($_POST['brand']??''),intval($_POST['low_stock_threshold']??10),
-                 trim($_POST['location']??''),trim($_POST['remark']??''),$id,$dataUid]);
+                 trim($_POST['brand']??''),$thrVal,
+                 trim($_POST['location']??''),trim($_POST['remark']??''),$alts,$id,$dataUid]);
             $db->prepare("DELETE FROM part_categories WHERE part_id=?")->execute([$id]);
             if ($ptype) linkCategories($id,$dataUid,parseCategories($ptype));
             redirect('index.php?flash=ok');
@@ -137,6 +142,22 @@ try {
             $db->prepare("UPDATE parts SET location=? WHERE user_id=? AND id IN (SELECT part_id FROM part_categories WHERE category_id IN ($inV))")
                ->execute([$location, $dataUid, ...$validIds]);
             redirect('categories.php?flash=ok');
+
+        // ==================== 批量设置备注 ====================
+        case 'batch_set_remark':
+            if (!hasPermission('can_edit') || !hasPermission('can_batch')) redirect('index.php');
+            $ids    = array_map('intval', $_POST['ids'] ?? []);
+            $remark = trim($_POST['remark'] ?? '');
+            if (empty($ids)) redirect('index.php?flash=err');
+            $in = implode(',', array_fill(0, count($ids), '?'));
+            $valid = $db->prepare("SELECT id FROM parts WHERE id IN ($in) AND user_id=?");
+            $valid->execute([...$ids, $dataUid]);
+            $validIds = array_column($valid->fetchAll(), 'id');
+            if (empty($validIds)) redirect('index.php?flash=err');
+            $inV = implode(',', array_fill(0, count($validIds), '?'));
+            $db->prepare("UPDATE parts SET remark=? WHERE id IN ($inV) AND user_id=?")
+               ->execute([$remark, ...$validIds, $dataUid]);
+            redirect('index.php?flash=ok');
 
         // ==================== 出入库操作（所有用户）====================
         case 'stock':
@@ -492,6 +513,27 @@ try {
                 }
             }
             redirect('log.php?flash=ok');
+
+        // ==================== 删除单条登录记录（仅主管理员）====================
+        case 'delete_login_log':
+            if (!isPrimaryAdmin()) redirect('admin.php?flash=forbidden&ft=err');
+            $logId = intval($_POST['log_id'] ?? 0);
+            if ($logId > 0) {
+                $db->prepare("DELETE FROM login_attempts WHERE id=?")->execute([$logId]);
+                adminLog($uid, '删除登录记录', "log_id:{$logId}");
+            }
+            redirect('admin.php?flash=ok#tab-monitor');
+
+        // ==================== 批量删除登录记录（仅主管理员）====================
+        case 'batch_delete_login_logs':
+            if (!isPrimaryAdmin()) redirect('admin.php?flash=forbidden&ft=err');
+            $logIds = array_map('intval', $_POST['log_ids'] ?? []);
+            if (!empty($logIds)) {
+                $in = implode(',', array_fill(0, count($logIds), '?'));
+                $db->prepare("DELETE FROM login_attempts WHERE id IN ($in)")->execute($logIds);
+                adminLog($uid, '批量删除登录记录', 'count:' . count($logIds));
+            }
+            redirect('admin.php?flash=ok#tab-monitor');
 
         default:
             redirect('index.php');

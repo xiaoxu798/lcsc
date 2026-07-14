@@ -254,6 +254,72 @@ function initDB(): void {
         $db->prepare("UPDATE settings SET v='11' WHERE k='schema_version'")->execute();
     }
 
+    // V12: BOM管理 + 替代料 + 批量备注
+    if ($schemaVer < 12) {
+        // parts 表新增替代料字段
+        try { $db->exec("ALTER TABLE parts ADD COLUMN alternatives TEXT DEFAULT NULL AFTER remark"); } catch (Throwable $e) {}
+        // BOM项目表
+        $db->exec("CREATE TABLE IF NOT EXISTS bom_projects (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            user_id     INT NOT NULL,
+            name        VARCHAR(200) NOT NULL,
+            description VARCHAR(500) DEFAULT '',
+            plat_id     INT DEFAULT 1,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_user (user_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        // BOM明细表
+        $db->exec("CREATE TABLE IF NOT EXISTS bom_items (
+            id              INT AUTO_INCREMENT PRIMARY KEY,
+            project_id      INT NOT NULL,
+            part_id         INT DEFAULT NULL,
+            platform_part_no VARCHAR(100),
+            model           VARCHAR(200),
+            qty             INT NOT NULL DEFAULT 1,
+            matched         TINYINT DEFAULT 0,
+            sort_order      INT DEFAULT 0,
+            INDEX idx_project (project_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $db->prepare("UPDATE settings SET v='12' WHERE k='schema_version'")->execute();
+    }
+
+    // V13: 三级阈值优先级 + 用户设置 + 访问统计 + 在线用户
+    if ($schemaVer < 13) {
+        // 分类表新增低库存阈值列（NULL=继承全局）
+        try { $db->exec("ALTER TABLE categories ADD COLUMN low_stock_threshold INT DEFAULT NULL"); } catch (Throwable $e) {}
+        // users 表新增最后活动时间列（用于在线用户统计）
+        try { $db->exec("ALTER TABLE users ADD COLUMN last_activity DATETIME DEFAULT NULL"); } catch (Throwable $e) {}
+        // 用户级设置表（普通管理员的全局阈值、子用户公告等）
+        $db->exec("CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INT NOT NULL,
+            k       VARCHAR(100) NOT NULL,
+            v       TEXT,
+            PRIMARY KEY (user_id, k)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        // 每日访问统计
+        $db->exec("CREATE TABLE IF NOT EXISTS daily_stats (
+            stat_date    DATE PRIMARY KEY,
+            total_visits INT DEFAULT 0,
+            unique_ips   INT DEFAULT 0,
+            updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        // 每日IP记录（用于统计独立IP数）
+        $db->exec("CREATE TABLE IF NOT EXISTS daily_ip_log (
+            id        INT AUTO_INCREMENT PRIMARY KEY,
+            stat_date DATE NOT NULL,
+            ip        VARCHAR(45) NOT NULL,
+            UNIQUE KEY uk_date_ip (stat_date, ip)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $db->prepare("UPDATE settings SET v='13' WHERE k='schema_version'")->execute();
+    }
+
+    // V14: parts 表新增 parameters 字段（存储元件参数/Value，如阻值、容值等）
+    if ($schemaVer < 14) {
+        try { $db->exec("ALTER TABLE parts ADD COLUMN parameters VARCHAR(500) DEFAULT '' AFTER location"); } catch (Throwable $e) {}
+        $db->prepare("UPDATE settings SET v='14' WHERE k='schema_version'")->execute();
+    }
+
     // 分类表
     $db->exec("CREATE TABLE IF NOT EXISTS categories (
         id      INT AUTO_INCREMENT PRIMARY KEY,
@@ -279,6 +345,7 @@ function initDB(): void {
         damaged             INT DEFAULT 0,
         low_stock_threshold INT DEFAULT 10,
         location            VARCHAR(200) DEFAULT '',
+        parameters          VARCHAR(500) DEFAULT '',
         remark              TEXT,
         update_time         DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_user_platform_part (user_id, platform_id, platform_part_no),
@@ -546,6 +613,8 @@ function requireLogin(): array {
     $u = currentUser();
     if (!$u) { header('Location: login.php'); exit; }
     if ($u['must_change_pw']) { header('Location: change_password.php'); exit; }
+    trackVisit();
+    updateUserActivity();
     return $u;
 }
 
@@ -653,6 +722,64 @@ function getSetting(string $k, string $default = ''): string {
 function setSetting(string $k, string $v): void {
     getDB()->prepare("INSERT INTO settings (k,v) VALUES (?,?) ON DUPLICATE KEY UPDATE v=?")
            ->execute([$k, $v, $v]);
+}
+
+// ── 用户级设置（普通管理员的独立配置）──
+function getUserSetting(int $uid, string $k, string $default = ''): string {
+    static $cache = [];
+    $ck = $uid . '|' . $k;
+    if (!isset($cache[$ck])) {
+        $s = getDB()->prepare("SELECT v FROM user_settings WHERE user_id=? AND k=?");
+        $s->execute([$uid, $k]);
+        $cache[$ck] = $s->fetchColumn() ?: $default;
+    }
+    return (string)$cache[$ck];
+}
+
+function setUserSetting(int $uid, string $k, string $v): void {
+    getDB()->prepare("INSERT INTO user_settings (user_id,k,v) VALUES (?,?,?) ON DUPLICATE KEY UPDATE v=?")
+           ->execute([$uid, $k, $v, $v]);
+}
+
+// ── 获取生效的低库存阈值（三级优先级：单品 > 分类 > 全局）──
+function getGlobalThreshold(int $dataUid): int {
+    // 普通管理员有自己的全局阈值，超级管理员用系统设置
+    $user = currentUser();
+    if ($user && $user['role'] === 'admin' && !isPrimaryAdmin()) {
+        $v = getUserSetting($user['id'], 'default_low_stock', '');
+        if ($v !== '' && $v !== '0') return (int)$v;
+    }
+    return (int)getSetting('default_low_stock', '10');
+}
+
+// ── 访问统计追踪 ──
+function trackVisit(): void {
+    static $tracked = false;
+    if ($tracked) return;
+    $tracked = true;
+    try {
+        $db = getDB();
+        $today = date('Y-m-d');
+        $ip = getClientIP();
+        $db->prepare("INSERT INTO daily_stats (stat_date,total_visits) VALUES (?,1) ON DUPLICATE KEY UPDATE total_visits=total_visits+1")
+           ->execute([$today]);
+        $db->prepare("INSERT IGNORE INTO daily_ip_log (stat_date,ip) VALUES (?,?)")->execute([$today, $ip]);
+        $db->prepare("UPDATE daily_stats SET unique_ips=(SELECT COUNT(*) FROM daily_ip_log WHERE stat_date=?) WHERE stat_date=?")
+           ->execute([$today, $today]);
+    } catch (Throwable $e) {}
+}
+
+// ── 更新用户最后活动时间 ──
+function updateUserActivity(): void {
+    static $updated = false;
+    if ($updated) return;
+    $updated = true;
+    try {
+        $user = currentUser();
+        if ($user) {
+            getDB()->prepare("UPDATE users SET last_activity=NOW() WHERE id=?")->execute([$user['id']]);
+        }
+    } catch (Throwable $e) {}
 }
 
 function adminLog(int $userId, string $action, string $detail = ''): void {

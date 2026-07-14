@@ -44,7 +44,8 @@ if (($_GET['export'] ?? '') === 'csv') {
 $flash = $_GET['flash'] ?? null;
 
 $page    = max(1, intval($_GET['page'] ?? 1));
-$perPage = 40;
+$perPage = intval($_GET['per_page'] ?? 25);
+$perPage = max(10, min(50, $perPage)); // 限制 10~50
 $cStmt = $db->prepare("SELECT COUNT(*) FROM stock_log l INNER JOIN parts p ON p.id=l.part_id WHERE p.user_id=?");
 $cStmt->execute([$dataUid]);
 $total = (int)$cStmt->fetchColumn();
@@ -153,19 +154,24 @@ require 'layout_head.php';
     </div>
 </form>
 
-<?php if($totalPage > 1): ?>
+<?php if($totalPage > 1 || $total > 0): ?>
 <div class="pagination">
-    <a href="?page=<?=$page-1?>" class="page-btn <?=$page<=1?'disabled':''?>">‹</a>
+    <a href="?per_page=<?=$perPage?>&page=<?=$page-1?>" class="page-btn <?=$page<=1?'disabled':''?>">‹</a>
     <?php
     $s = max(1,$page-2); $e = min($totalPage,$page+2);
-    if($s>1) echo '<a href="?page=1" class="page-btn">1</a>';
+    if($s>1) echo '<a href="?per_page='.$perPage.'&page=1" class="page-btn">1</a>';
     if($s>2) echo '<span class="page-info">…</span>';
-    for($i=$s;$i<=$e;$i++) echo '<a href="?page='.$i.'" class="page-btn '.($i===$page?'active':'').'">'.$i.'</a>';
+    for($i=$s;$i<=$e;$i++) echo '<a href="?per_page='.$perPage.'&page='.$i.'" class="page-btn '.($i===$page?'active':'').'">'.$i.'</a>';
     if($e<$totalPage-1) echo '<span class="page-info">…</span>';
-    if($e<$totalPage) echo '<a href="?page='.$totalPage.'" class="page-btn">'.$totalPage.'</a>';
+    if($e<$totalPage) echo '<a href="?per_page='.$perPage.'&page='.$totalPage.'" class="page-btn">'.$totalPage.'</a>';
     ?>
-    <a href="?page=<?=$page+1?>" class="page-btn <?=$page>=$totalPage?'disabled':''?>">›</a>
+    <a href="?per_page=<?=$perPage?>&page=<?=$page+1?>" class="page-btn <?=$page>=$totalPage?'disabled':''?>">›</a>
     <span class="page-info">共 <?=$total?> 条</span>
+    <select onchange="location='?per_page='+this.value" class="per-page-select">
+        <option value="10" <?=$perPage===10?'selected':''?>>10条/页</option>
+        <option value="25" <?=$perPage===25?'selected':''?>>25条/页</option>
+        <option value="50" <?=$perPage===50?'selected':''?>>50条/页</option>
+    </select>
 </div>
 <?php endif; ?>
 </div>

@@ -499,7 +499,7 @@ require 'layout_head.php';
     <h3 style="font-size:15px;margin-bottom:10px;">使用提示</h3>
     <ul style="font-size:13px;color:var(--text2);padding-left:18px;line-height:2;">
         <li><strong>摄像头扫码</strong>：点击📷按钮打开摄像头，对准二维码/条码自动识别。识别成功后弹出结果窗口（2秒自动关闭），期间暂停扫描，关闭后自动恢复。</li>
-        <li><strong>截图识别</strong>：若自动识别较慢，可点击"📸 截图识别"手动截取当前画面进行解码。</li>
+        <li><strong>截图识别</strong>：若自动识别较慢，可点击"📸 截图识别"手动截取当前画面。系统会对截图进行8轮预处理容错（OTSU二值化、反转、中值滤波等），专治打印机断针、墨迹斑驳、光照不均等缺陷二维码，识别成功率大幅提升。</li>
         <li><strong>扫码枪</strong>：首次使用请点击"连接"按钮验证。扫码枪输入后会自动提交并弹出结果。</li>
         <li><strong>快速数量</strong>：使用 − / + 按钮微调数量，或直接点击 5/10/50/100 快速设置。</li>
         <li><strong>撤销操作</strong>：在下方"最近扫描记录"中点击↩按钮可撤销对应记录，库存将回滚。</li>
@@ -1262,9 +1262,9 @@ function onScanFailure(error) {
     // 每帧未识别到条码时的回调，无需处理
 }
 
-// ── 手动截图识别 ──
-// 从视频流截取当前帧，使用 html5-qrcode 的 scanFile 方法解码
-// 作为自动识别失败时的补充手段（类似其他扫码应用的"对焦后截图"）
+// ── 手动截图识别（多轮预处理容错）──
+// 参考 batch_qr_reader.py 的多通道容错思路，对截图进行多轮预处理后逐一尝试解码
+// 专治打印机断针、墨迹斑驳、光照不均等缺陷二维码
 var captureScanning = false;
 function captureAndScan() {
     if (captureScanning) return;
@@ -1281,7 +1281,7 @@ function captureAndScan() {
     captureScanning = true;
     var captureBtn = document.getElementById('captureBtn');
     var originalText = captureBtn.textContent;
-    captureBtn.textContent = '⏳ 识别中...';
+    captureBtn.textContent = '⏳ 深度识别中...';
     captureBtn.disabled = true;
 
     try {
@@ -1292,48 +1292,176 @@ function captureAndScan() {
         var ctx = canvas.getContext('2d');
         ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
-        // 转为 Blob 再转 File（scanFile 需要 File 对象）
-        canvas.toBlob(function(blob) {
-            if (!blob) {
-                captureScanning = false;
-                captureBtn.textContent = originalText;
-                captureBtn.disabled = false;
-                showToast('截图失败', 'error');
-                return;
-            }
-            var imageFile = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
+        // 生成多轮预处理变体（原图 + 灰度二值化 + 反转 + 中值滤波等）
+        var variants = generatePreprocessedVariants(canvas, ctx);
 
-            // 创建隐藏的临时 div 用于 scanFile（避免与正在运行的实例冲突）
-            var tempDiv = document.createElement('div');
-            tempDiv.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;';
-            tempDiv.id = 'tempScanDiv_' + Date.now();
-            document.body.appendChild(tempDiv);
-
-            var tempScanner = new Html5Qrcode(tempDiv.id);
-            // scanFile 第二个参数 showImage=false，不渲染图片到容器
-            tempScanner.scanFile(imageFile, false).then(function(decodedText) {
-                captureScanning = false;
-                captureBtn.textContent = originalText;
-                captureBtn.disabled = false;
-                try { tempScanner.clear(); } catch(e) {}
-                try { document.body.removeChild(tempDiv); } catch(e) {}
-                // 调用标准成功处理
-                onScanSuccess(decodedText, null);
-            }).catch(function(err) {
-                captureScanning = false;
-                captureBtn.textContent = originalText;
-                captureBtn.disabled = false;
-                try { tempScanner.clear(); } catch(e) {}
-                try { document.body.removeChild(tempDiv); } catch(e) {}
-                showToast('⚠ 截图未识别到二维码，请调整角度/距离后重试', 'warning');
-            });
-        }, 'image/jpeg', 0.92);
+        // 依次尝试每个预处理变体
+        tryDecodeVariants(variants, 0, captureBtn, originalText, function(decodedText, methodName) {
+            captureScanning = false;
+            captureBtn.textContent = originalText;
+            captureBtn.disabled = false;
+            showToast('✓ 识别成功（通道: ' + methodName + '）', 'success');
+            onScanSuccess(decodedText, null);
+        }, function() {
+            captureScanning = false;
+            captureBtn.textContent = originalText;
+            captureBtn.disabled = false;
+            showToast('⚠ 截图未识别到二维码，已尝试全部 ' + variants.length + ' 种预处理方案', 'warning');
+        });
     } catch(e) {
         captureScanning = false;
         captureBtn.textContent = originalText;
         captureBtn.disabled = false;
         showToast('截图识别失败: ' + (e.message || e), 'error');
     }
+}
+
+// ── 生成预处理图像变体 ──
+// 参考 Python 脚本的 PREPROCESS_PIPELINE，用 Canvas API 实现等价预处理
+// 策略：原图 → OTSU二值化 → OTSU反转 → 低阈值 → 低阈值反转 → 高阈值 → 中值滤波+OTSU → 中值滤波+OTSU反转
+function generatePreprocessedVariants(srcCanvas, srcCtx) {
+    var w = srcCanvas.width, h = srcCanvas.height;
+    var variants = [];
+
+    // 获取原始像素数据并计算灰度数组
+    var srcData = srcCtx.getImageData(0, 0, w, h);
+    var gray = new Uint8ClampedArray(w * h);
+    for (var i = 0, j = 0; i < srcData.data.length; i += 4, j++) {
+        gray[j] = Math.round(0.299 * srcData.data[i] + 0.587 * srcData.data[i+1] + 0.114 * srcData.data[i+2]);
+    }
+
+    // 1. 原图直扫
+    variants.push({ name: '原图', canvas: srcCanvas });
+
+    // 计算 OTSU 阈值
+    var otsuThresh = calcOtsuThreshold(gray);
+
+    // 2. OTSU 二值化
+    variants.push({ name: 'OTSU二值化', canvas: makeBinaryCanvas(gray, w, h, otsuThresh, false) });
+    // 3. OTSU 反转（应对深色背景上的浅色码）
+    variants.push({ name: 'OTSU反转', canvas: makeBinaryCanvas(gray, w, h, otsuThresh, true) });
+    // 4. 低阈值二值化（适合暗图）
+    variants.push({ name: '低阈值(100)', canvas: makeBinaryCanvas(gray, w, h, 100, false) });
+    // 5. 低阈值反转
+    variants.push({ name: '低阈值反转', canvas: makeBinaryCanvas(gray, w, h, 100, true) });
+    // 6. 高阈值二值化（适合亮图）
+    variants.push({ name: '高阈值(160)', canvas: makeBinaryCanvas(gray, w, h, 160, false) });
+
+    // 7-8. 中值滤波 + OTSU（消除断针细白线，类似 Python 脚本的 preprocess_median_blur）
+    // 大图降采样以避免卡顿：超过 800px 宽度的图先缩小
+    var blurW = w, blurH = h, blurGray = gray;
+    if (w > 800) {
+        var scale = 800 / w;
+        blurW = Math.round(w * scale);
+        blurH = Math.round(h * scale);
+        blurGray = downscaleGray(gray, w, h, blurW, blurH);
+    }
+    var blurredGray = medianBlurGray(blurGray, blurW, blurH, 3);
+    var blurredOtsuThresh = calcOtsuThreshold(blurredGray);
+    variants.push({ name: '中值滤波+OTSU', canvas: makeBinaryCanvas(blurredGray, blurW, blurH, blurredOtsuThresh, false) });
+    variants.push({ name: '中值滤波+OTSU反转', canvas: makeBinaryCanvas(blurredGray, blurW, blurH, blurredOtsuThresh, true) });
+
+    return variants;
+}
+
+// OTSU 大津法自动阈值
+function calcOtsuThreshold(gray) {
+    var histogram = new Array(256).fill(0);
+    for (var i = 0; i < gray.length; i++) histogram[gray[i]]++;
+    var total = gray.length, sum = 0;
+    for (var t = 0; t < 256; t++) sum += t * histogram[t];
+    var sumB = 0, wB = 0, maxVar = 0, threshold = 127;
+    for (var t = 0; t < 256; t++) {
+        wB += histogram[t];
+        if (wB === 0) continue;
+        var wF = total - wB;
+        if (wF === 0) break;
+        sumB += t * histogram[t];
+        var mB = sumB / wB, mF = (sum - sumB) / wF;
+        var betweenVar = wB * wF * (mB - mF) * (mB - mF);
+        if (betweenVar > maxVar) { maxVar = betweenVar; threshold = t; }
+    }
+    return threshold;
+}
+
+// 生成二值化 canvas（invert=true 时反转黑白）
+function makeBinaryCanvas(gray, w, h, threshold, invert) {
+    var canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext('2d');
+    var imageData = ctx.createImageData(w, h);
+    for (var i = 0, j = 0; i < imageData.data.length; i += 4, j++) {
+        var val = gray[j] >= threshold ? 255 : 0;
+        if (invert) val = 255 - val;
+        imageData.data[i] = val;
+        imageData.data[i+1] = val;
+        imageData.data[i+2] = val;
+        imageData.data[i+3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+}
+
+// 灰度图降采样（近邻采样）
+function downscaleGray(gray, srcW, srcH, dstW, dstH) {
+    var result = new Uint8ClampedArray(dstW * dstH);
+    var xRatio = srcW / dstW, yRatio = srcH / dstH;
+    for (var y = 0; y < dstH; y++) {
+        for (var x = 0; x < dstW; x++) {
+            result[y * dstW + x] = gray[Math.floor(y * yRatio) * srcW + Math.floor(x * xRatio)];
+        }
+    }
+    return result;
+}
+
+// 3x3 中值滤波（消除打印机断针造成的细白线）
+function medianBlurGray(gray, w, h, ksize) {
+    var half = Math.floor(ksize / 2);
+    var result = new Uint8ClampedArray(gray.length);
+    for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+            var values = [];
+            for (var dy = -half; dy <= half; dy++) {
+                for (var dx = -half; dx <= half; dx++) {
+                    var nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                        values.push(gray[ny * w + nx]);
+                    }
+                }
+            }
+            values.sort(function(a, b) { return a - b; });
+            result[y * w + x] = values[Math.floor(values.length / 2)];
+        }
+    }
+    return result;
+}
+
+// 依次尝试解码变体（每个变体用独立的临时 div 避免冲突）
+function tryDecodeVariants(variants, index, captureBtn, originalText, onSuccess, onAllFail) {
+    if (index >= variants.length) { onAllFail(); return; }
+    var variant = variants[index];
+    if (captureBtn) {
+        captureBtn.textContent = '⏳ (' + (index + 1) + '/' + variants.length + ') ' + variant.name;
+    }
+    variant.canvas.toBlob(function(blob) {
+        if (!blob) { tryDecodeVariants(variants, index + 1, captureBtn, originalText, onSuccess, onAllFail); return; }
+        var imageFile = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
+        // 每次创建独立的临时 div 和扫描器实例，避免状态残留
+        var tempDiv = document.createElement('div');
+        tempDiv.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;';
+        tempDiv.id = 'tempScanDiv_' + Date.now() + '_' + index;
+        document.body.appendChild(tempDiv);
+        var tempScanner = new Html5Qrcode(tempDiv.id);
+        tempScanner.scanFile(imageFile, false).then(function(decodedText) {
+            try { tempScanner.clear(); } catch(e) {}
+            try { document.body.removeChild(tempDiv); } catch(e) {}
+            onSuccess(decodedText, variant.name);
+        }).catch(function(err) {
+            try { tempScanner.clear(); } catch(e) {}
+            try { document.body.removeChild(tempDiv); } catch(e) {}
+            tryDecodeVariants(variants, index + 1, captureBtn, originalText, onSuccess, onAllFail);
+        });
+    }, 'image/jpeg', 0.92);
 }
 
 // ── 防重复扫描 ──

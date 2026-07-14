@@ -225,8 +225,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excel'])) {
                             $pid = $existing['id'];
                             $stats['updated']++;
                         } else {
+                            // 新元器件阈值设为 NULL，继承全局阈值（最低优先级）
                             $db->prepare("INSERT INTO parts (user_id,platform_id,platform_part_no,customer_part_no,model,product_name,product_type,package,brand,stock,low_stock_threshold) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-                               ->execute([$dataUid, $platId, $partNo, $cpn, $model, $pname, $ptype, $pkg, $brand, $qty, intval(getSetting('default_low_stock','10'))]);
+                               ->execute([$dataUid, $platId, $partNo, $cpn, $model, $pname, $ptype, $pkg, $brand, $qty, null]);
                             $pid = (int)$db->lastInsertId();
                             $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
                                ->execute([$uid, $pid, $partNo, 'import', $qty, 0, $qty, '订单:'.$orderNo]);

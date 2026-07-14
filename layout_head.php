@@ -60,7 +60,6 @@ button,input,select,textarea{font-family:inherit;}
 .topbar-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0;}
 .icon-btn{background:none;border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s;display:flex;align-items:center;gap:5px;text-decoration:none;}
 .icon-btn:hover{border-color:var(--accent);color:var(--accent);}
-.scan-tag{font-size:9px;padding:1px 5px;border-radius:3px;background:var(--yellow-dim);color:var(--yellow);border:1px solid rgba(245,158,11,.3);}
 
 /* ── More menu (mobile) ── */
 .nav-sep{width:1px;height:18px;background:var(--border);margin:0 2px;align-self:center;}
@@ -76,7 +75,6 @@ button,input,select,textarea{font-family:inherit;}
 
 /* ── Layout ── */
 .main{max-width:1280px;margin:0 auto;padding:20px;}
-.page-narrow{max-width:700px;}
 .page-mid{max-width:960px;}
 /* Glass container for consistent page width */
 .glass-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:22px;}
@@ -100,7 +98,7 @@ button,input,select,textarea{font-family:inherit;}
 .btn-full{width:100%;justify-content:center;}
 
 /* ── Cards ── */
-.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;min-width:0;max-width:100%;}
 .card-pad{padding:18px 22px;}
 
 /* ── Stats ── */
@@ -126,10 +124,6 @@ button,input,select,textarea{font-family:inherit;}
 .pill.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent);}
 .pill.warn.active{background:var(--yellow-dim);border-color:var(--yellow);color:var(--yellow);}
 .pill.danger.active{background:var(--red-dim);border-color:var(--red);color:var(--red);}
-
-/* ── Category pills ── */
-.cat-section{margin-bottom:14px;}
-.cat-section-label{font-size:11px;color:var(--text3);margin-bottom:7px;letter-spacing:.3px;}
 
 /* ── Table ── */
 .table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
@@ -182,9 +176,9 @@ tbody tr:hover td{background:var(--surface2);}
 .drawer-close:hover{background:var(--surface2);color:var(--text);}
 
 /* ── Form ── */
-.form-group{margin-bottom:13px;}
+.form-group{margin-bottom:13px;min-width:0;}
 .form-group label{display:block;font-size:11px;color:var(--text2);margin-bottom:4px;letter-spacing:.3px;}
-.form-group input,.form-group textarea,.form-group select{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 11px;border-radius:7px;font-size:13px;outline:none;transition:border-color .15s;}
+.form-group input,.form-group textarea,.form-group select{width:100%;min-width:0;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 11px;border-radius:7px;font-size:13px;outline:none;transition:border-color .15s;}
 .form-group input:focus,.form-group textarea:focus,.form-group select:focus{border-color:var(--accent);}
 .form-group textarea{resize:vertical;min-height:64px;}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
@@ -255,7 +249,7 @@ tbody tr:hover td{background:var(--surface2);}
   .topbar-right{gap:4px;margin-left:0;}
   .topbar-right .icon-btn:not(#themeBtn){display:none !important;}
   .topbar-right .icon-btn#themeBtn{padding:4px 8px;font-size:11px;}
-  /* Mobile bottom nav bar: 一级导航（库存/扫码/更多/退出） */
+  /* Mobile bottom nav bar: 一级导航（库存/出入库/更多/退出） */
   .mobile-nav{display:flex !important;position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);z-index:199;padding:6px 8px;padding-bottom:max(6px,env(safe-area-inset-bottom));gap:4px;justify-content:space-around;align-items:stretch;}
   .mobile-nav a,.mobile-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 10px;border-radius:8px;font-size:10px;color:var(--text2);text-decoration:none;background:none;border:none;cursor:pointer;min-width:0;flex:1;max-width:90px;}
   .mobile-nav a.active,.mobile-nav a:hover{color:var(--accent);background:var(--accent-dim);}
@@ -296,6 +290,52 @@ tbody tr:hover td{background:var(--surface2);}
 .inv-card-body{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--text2);margin-bottom:10px;}
 .inv-card-body span{color:var(--text);}
 .inv-card-actions{display:flex;gap:6px;flex-wrap:wrap;}
+
+/* ── 响应式栅格工具类（统一桌面/移动端排版）── */
+.grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+@media(max-width:768px){
+  .grid-2,.grid-3,.grid-4{grid-template-columns:1fr;}
+  .grid-2.stats-row,.grid-4.stats-row{grid-template-columns:repeat(2,1fr);}
+}
+
+/* ── 页面标题标准化 ── */
+.page-header{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
+.page-header h2{font-size:17px;flex:1;min-width:0;margin:0;}
+.page-header .page-desc{color:var(--text2);font-size:13px;margin:0 0 18px;width:100%;}
+.page-subtitle{color:var(--text2);font-size:13px;margin:0 0 18px;}
+
+/* ── 防止表格列挤压：小屏下表格保持最小宽度并横向滚动 ── */
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.table-wrap table{min-width:560px;}
+
+/* ── 移动端弹窗全宽适配 ── */
+@media(max-width:600px){
+  .overlay{padding:0;align-items:flex-end;}
+  .modal{border-radius:12px 12px 0 0;max-width:100%;max-height:92vh;padding:18px 16px;}
+  .modal-sm{max-width:100%;}
+  .modal-lg{max-width:100%;}
+  .glass-box{padding:14px;}
+  .card-pad{padding:14px;}
+  .stat-card{padding:12px 14px;}
+  .toolbar{gap:6px;}
+}
+
+/* ── 间距工具类 ── */
+.mt-0{margin-top:0;}.mt-1{margin-top:6px;}.mt-2{margin-top:12px;}.mt-3{margin-top:18px;}
+.mb-0{margin-bottom:0;}.mb-1{margin-bottom:6px;}.mb-2{margin-bottom:12px;}.mb-3{margin-bottom:18px;}
+.gap-1{gap:6px;}.gap-2{gap:10px;}.gap-3{gap:16px;}
+.flex{display:flex;}.flex-wrap{flex-wrap:wrap;}.flex-1{flex:1;min-width:0;}
+.items-center{align-items:center;}.justify-between{justify-content:space-between;}
+.text-right{text-align:right;}.text-center{text-align:center;}
+.text-2{color:var(--text2);font-size:13px;}.text-3{color:var(--text3);font-size:12px;}
+.w-full{width:100%;}
+.per-page-select{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer;margin-left:8px;}
+/* ── 分类标签标准化（等宽、省略、统一间距）── */
+.cat-pill{min-width:64px;max-width:180px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 10px;font-size:12px;}
+.cat-pill span{font-size:10px;}
+.cat-pill-toggle{min-width:auto !important;max-width:none !important;padding:4px 8px !important;}
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
@@ -309,9 +349,8 @@ tbody tr:hover td{background:var(--surface2);}
     </div>
     <nav class="topbar-nav" id="topbarNav">
         <a href="index.php" <?=$activePage==='index'?'class="active"':''?>>库存</a>
-        <a href="scan.php" <?=$activePage==='scan'?'class="active"':''?>>扫码</a>
-        <a href="import.php" <?=$activePage==='import'?'class="active"':''?>>导入</a>
-        <a href="bom_export.php" <?=$activePage==='bom_export'?'class="active"':''?>>BOM出库</a>
+        <a href="stock_center.php" <?=in_array($activePage,['stock_center','scan','import','bom_export'],true)?'class="active"':''?>>出入库</a>
+        <a href="bom_manager.php" <?=$activePage==='bom_manager'?'class="active"':''?>>BOM管理</a>
         <a href="categories.php" <?=$activePage==='categories'?'class="active"':''?>>分类</a>
         <span class="nav-sep"></span>
         <a href="log.php" <?=$activePage==='log'?'class="active"':''?>>记录</a>
@@ -333,8 +372,8 @@ tbody tr:hover td{background:var(--surface2);}
     <a href="index.php" class="<?=$activePage==='index'?'active':''?>">
         <span class="m-icon">📦</span>库存
     </a>
-    <a href="scan.php" class="<?=$activePage==='scan'?'active':''?>">
-        <span class="m-icon">📷</span>扫码
+    <a href="stock_center.php" class="<?=in_array($activePage,['stock_center','scan','import','bom_export'],true)?'active':''?>">
+        <span class="m-icon">🔄</span>出入库
     </a>
     <button class="more-btn" onclick="toggleMobileMore()" id="mobileMoreBtn">
         <span class="m-icon">⋯</span>更多
@@ -351,11 +390,8 @@ tbody tr:hover td{background:var(--surface2);}
 <div class="mobile-more-backdrop" id="mobileMoreBackdrop" onclick="closeMobileMore()"></div>
 <!-- 移动端更多菜单 -->
 <div class="mobile-more-menu" id="mobileMoreMenu">
-    <a href="import.php" class="<?=$activePage==='import'?'active':''?>">
-        <span class="mm-icon">📥</span>导入
-    </a>
-    <a href="bom_export.php" class="<?=$activePage==='bom_export'?'active':''?>">
-        <span class="mm-icon">📋</span>BOM出库
+    <a href="bom_manager.php" class="<?=$activePage==='bom_manager'?'active':''?>">
+        <span class="mm-icon">📋</span>BOM管理
     </a>
     <a href="categories.php" class="<?=$activePage==='categories'?'active':''?>">
         <span class="mm-icon">🏷️</span>分类
@@ -378,7 +414,7 @@ tbody tr:hover td{background:var(--surface2);}
 
 <!-- ── 底部版权（由 JS 移动到页面末尾）── -->
 <footer class="site-footer" style="text-align:center;padding:10px 12px;font-size:11px;color:var(--text3);border-top:1px solid var(--border);">
-    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">元件库存管理系统 v1.0.3</a>
+    <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">元件库存管理系统 v1.0.4</a>
     &middot;
     &copy; <?= date('Y') ?> <a href="https://github.com/xiaoxu798/lcsc" target="_blank" rel="noopener" style="color:var(--text3);text-decoration:none;">xiaoxu798</a>
     &middot;
