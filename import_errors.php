@@ -19,7 +19,7 @@ $activePage = 'import';
 $extraTopbarRight = '<a href="import.php" class="btn btn-ghost btn-sm">← 返回导入</a>';
 require 'layout_head.php';
 ?>
-<div class="main page-mid">
+<div class="main">
 <div class="glass-box">
     <h2 style="margin-bottom:6px">导入错误详情</h2>
     <p style="color:var(--text2);font-size:13px;margin-bottom:20px">共 <?=count($errors)?> 条失败记录</p>

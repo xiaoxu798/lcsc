@@ -17,7 +17,34 @@ define('DB_USER',    'lcsc');
 define('DB_PASS',    'admin');
 define('DB_CHARSET', 'utf8mb4');
 
+// 当前系统版本号（用于线上版本校验）
+define('APP_VERSION', '1.1.0');
+
 // ── Session 安全启动 ────────────────────────────────────
+/**
+ * 全局完整销毁会话（4步完整清理）
+ * 统一用于：超时、挤下线、CSRF失效、手动登出、登录页前置清理
+ * 1. 清空会话变量  2. 销毁服务端session文件  3. 清除浏览器PHPSESSID Cookie  4. 清空csrf令牌
+ */
+function destroySession(): void {
+    // 步骤1：清空所有会话变量
+    $_SESSION = [];
+    // 步骤2：销毁服务端 session 文件
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_destroy();
+    }
+    // 步骤3：清除浏览器 PHPSESSID Cookie
+    if (ini_get("session.use_cookies")) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000,
+            $params["path"], $params["domain"],
+            $params["secure"], $params["httponly"]
+        );
+    }
+    // 步骤4：csrf令牌已在$_SESSION=[]中清空，无需额外操作
+    // 注意：调用方如需重新使用session，须调用 session_start() 重新启动
+}
+
 function startSession(): void {
     if (session_status() === PHP_SESSION_NONE) {
         // 会话安全配置
@@ -27,19 +54,46 @@ function startSession(): void {
         $timeout = (int)(getSetting('session_timeout', '1800') ?: '1800');
         // 上限保护：最长 86400 秒（24 小时），0 视为默认 1800
         if ($timeout <= 0 || $timeout > 86400) $timeout = 1800;
+
+        // 「记住我」：检测持久化 cookie，延长 session cookie 生命周期
+        $rememberLifetime = 0;
+        if (!empty($_COOKIE['remember_me'])) {
+            $rememberLifetime = 30 * 86400; // 30天
+            $timeout = $rememberLifetime;   // 同步延长超时
+        }
+
+        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? 0) == 443);
         session_set_cookie_params([
-            'lifetime' => 0,  // 浏览器关闭即过期，不依赖 cookie 持久登录
+            'lifetime' => $rememberLifetime,
             'path'     => '/',
-            'secure'   => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? 0) == 443),
+            'secure'   => $isHttps,
             'httponly' => true,
             'samesite' => 'Strict',
         ]);
         session_start();
+
         // 会话超时检查
         if (isset($_SESSION['last_activity']) && (time() - $_SESSION['last_activity'] > $timeout)) {
-            session_unset();
-            session_destroy();
-            session_start();
+            // 超时处理：区分 GET 和 POST/AJAX
+            if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
+                // GET 请求：完全销毁旧 session，重建空 session（彻底避免 CSRF 残留问题）
+                // 不设置 timeout_notice：用户关闭标签页后重新打开属于"全新访问"，应显示纯净登录页
+                // 仅 POST/AJAX 主动操作时超时才弹窗提示
+                destroySession();
+                session_set_cookie_params([
+                    'lifetime' => $rememberLifetime,
+                    'path'     => '/',
+                    'secure'   => $isHttps,
+                    'httponly' => true,
+                    'samesite' => 'Strict',
+                ]);
+                session_start();
+                $_SESSION['csrf'] = bin2hex(random_bytes(16));
+            } else {
+                // POST/AJAX：仅清除用户数据，保留 CSRF（避免当前请求的 POST 表单 CSRF 失配）
+                unset($_SESSION['user_id'], $_SESSION['user']);
+                $_SESSION['timeout_notice'] = true;
+            }
         }
         $_SESSION['last_activity'] = time();
     }
@@ -64,57 +118,43 @@ function getDB(): PDO {
     return $db;
 }
 
-// ── 初始化数据库 ────────────────────────────────────────
+// ── 初始化数据库（v1.1.0 正式版基线）──
 function initDB(): void {
     $db = getDB();
 
-    // 系统设置
+    // ── 系统设置 ──
     $db->exec("CREATE TABLE IF NOT EXISTS settings (
         k VARCHAR(100) PRIMARY KEY,
         v TEXT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    $defaults = [
-        'site_title'        => '元件库存管理',
-        'site_logo'         => '',
-        'register_mode'     => 'closed',
-        'notice_content'    => '',
-        'notice_show_mode'  => 'once',
-        'default_low_stock' => '10',
-        'theme_default'     => 'dark',
-        'schema_version'    => '1',
-        'session_timeout'   => '0',
-    ];
-    foreach ($defaults as $k => $v) {
-        $db->prepare("INSERT IGNORE INTO settings (k,v) VALUES (?,?)")->execute([$k,$v]);
-    }
-
-    $schemaVer = (int)($db->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() ?: 0);
-
-    // V2 升级：字符集修复
-    if ($schemaVer < 2) {
-        $tables = ['categories','parts','stock_log','price_history','import_history',
-                   'import_errors','imported_files','settings','users','platforms','invite_codes',
-                   'notice_seen','admin_log','part_categories','scan_log','backup_log'];
-        foreach ($tables as $t) {
-            try { $db->exec("ALTER TABLE `$t` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"); }
-            catch (\Throwable $e) {}
-        }
-        $db->prepare("UPDATE settings SET v='2' WHERE k='schema_version'")->execute();
-    }
-
-    // 用户表
+    // ── 用户表 ──
     $db->exec("CREATE TABLE IF NOT EXISTS users (
         id            INT AUTO_INCREMENT PRIMARY KEY,
         username      VARCHAR(50) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
         role          ENUM('admin','user') DEFAULT 'admin',
         must_change_pw TINYINT(1) DEFAULT 0,
+        parent_id     INT DEFAULT NULL,
+        permissions   TEXT DEFAULT NULL,
         created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login    DATETIME
+        last_login    DATETIME,
+        last_activity DATETIME DEFAULT NULL,
+        INDEX idx_parent (parent_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 邀请码
+    // ── 登录失败记录（防暴力破解）──
+    $db->exec("CREATE TABLE IF NOT EXISTS login_attempts (
+        id         INT AUTO_INCREMENT PRIMARY KEY,
+        username   VARCHAR(50) NOT NULL,
+        ip         VARCHAR(45) NOT NULL,
+        success    TINYINT(1) DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_username_time (username, created_at),
+        INDEX idx_ip_time (ip, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // ── 邀请码 ──
     $db->exec("CREATE TABLE IF NOT EXISTS invite_codes (
         id         INT AUTO_INCREMENT PRIMARY KEY,
         code       VARCHAR(32) UNIQUE NOT NULL,
@@ -124,7 +164,7 @@ function initDB(): void {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 公告已读
+    // ── 公告已读 ──
     $db->exec("CREATE TABLE IF NOT EXISTS notice_seen (
         user_id    INT NOT NULL,
         version    VARCHAR(32) NOT NULL,
@@ -132,208 +172,36 @@ function initDB(): void {
         PRIMARY KEY (user_id, version)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 平台表（全局共享，含 URL 跳转模板）
-    // V3 升级：先补列再创建表/插入数据（兼容旧表无 url_template 列）
-    if ($schemaVer < 3) {
-        try { $db->exec("ALTER TABLE platforms ADD COLUMN url_template VARCHAR(500) DEFAULT '' AFTER name"); }
-        catch (\Throwable $e) {}
-        // 移除旧 status 列（V4.0 不再使用 status 枚举）
-        try { $db->exec("ALTER TABLE parts DROP COLUMN status"); }
-        catch (\Throwable $e) {}
-    }
-
-    // V4 升级：不良品计数（替代旧的 status 枚举）
-    if ($schemaVer < 4) {
-        try { $db->exec("ALTER TABLE parts ADD COLUMN damaged INT DEFAULT 0 AFTER stock"); }
-        catch (\Throwable $e) {}
-        // 更新 stock_log ENUM 加入 damaged/repair
-        try {
-            $db->exec("ALTER TABLE stock_log MODIFY change_type ENUM('import','manual_in','manual_out','adjust','scan_in','scan_out','damaged','repair') NOT NULL");
-        } catch (\Throwable $e) {}
-        $db->prepare("UPDATE settings SET v='4' WHERE k='schema_version'")->execute();
-    }
-
-    // V5 升级：登录安全 + 子用户支持
-    if ($schemaVer < 5) {
-        // 登录失败记录表（防暴力破解）
-        $db->exec("CREATE TABLE IF NOT EXISTS login_attempts (
-            id         INT AUTO_INCREMENT PRIMARY KEY,
-            username   VARCHAR(50) NOT NULL,
-            ip         VARCHAR(45) NOT NULL,
-            success    TINYINT(1) DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_username_time (username, created_at),
-            INDEX idx_ip_time (ip, created_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-        // 子用户支持：parent_id 指向父用户
-        try { $db->exec("ALTER TABLE users ADD COLUMN parent_id INT DEFAULT NULL AFTER role"); }
-        catch (\Throwable $e) {}
-        try { $db->exec("ALTER TABLE users ADD INDEX idx_parent (parent_id)"); }
-        catch (\Throwable $e) {}
-        $db->prepare("UPDATE settings SET v='5' WHERE k='schema_version'")->execute();
-    }
-
-    // V6 升级：子用户权限（可自定义每个子用户的能力）
-    if ($schemaVer < 6) {
-        try { $db->exec("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT NULL AFTER role"); }
-        catch (\Throwable $e) {}
-        $db->prepare("UPDATE settings SET v='6' WHERE k='schema_version'")->execute();
-    }
-
+    // ── 平台表 ──
     $db->exec("CREATE TABLE IF NOT EXISTS platforms (
-        id           INT AUTO_INCREMENT PRIMARY KEY,
-        user_id      INT NOT NULL DEFAULT 1,
-        code         VARCHAR(50) NOT NULL,
-        name         VARCHAR(100) NOT NULL,
-        url_template VARCHAR(500) DEFAULT '',
-        is_default   TINYINT(1) NOT NULL DEFAULT 0,
+        id            INT AUTO_INCREMENT PRIMARY KEY,
+        user_id       INT NOT NULL DEFAULT 1,
+        code          VARCHAR(50) NOT NULL,
+        name          VARCHAR(100) NOT NULL,
+        url_template  VARCHAR(500) DEFAULT '',
+        is_default    TINYINT(1) NOT NULL DEFAULT 0,
+        platform_type VARCHAR(20) NOT NULL DEFAULT 'standard',
         INDEX idx_plat_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 仅在首次初始化（表为空）时插入默认平台，之后不再自动插入
-    $platCount = (int)$db->query("SELECT COUNT(*) FROM platforms")->fetchColumn();
-    if ($platCount === 0) {
-        $db->exec("INSERT INTO platforms (user_id,code,name,url_template,is_default) VALUES
-            (1,'lcsc','立创商城','https://so.szlcsc.com/global.html?k={part_no}',1),
-            (1,'other','其他','',0)");
-    }
-
-    if ($schemaVer < 3) {
-        // 更新默认平台 URL 模板
-        $db->exec("UPDATE platforms SET url_template='https://so.szlcsc.com/global.html?k={part_no}' WHERE code='lcsc' AND url_template=''");
-        $db->prepare("UPDATE settings SET v='3' WHERE k='schema_version'")->execute();
-    }
-
-    // V7 升级：默认平台标记 + 去除重复内置平台
-    if ($schemaVer < 7) {
-        try { $db->exec("ALTER TABLE platforms ADD COLUMN is_default TINYINT(1) NOT NULL DEFAULT 0"); } catch (\Throwable $e) {}
-        $db->exec("UPDATE platforms SET is_default=1 WHERE code='lcsc' AND is_default=0");
-        $db->prepare("UPDATE settings SET v='7' WHERE k='schema_version'")->execute();
-    }
-
-    // V8 升级：修复 stock_log ENUM，添加撤销操作类型和BOM出库类型
-    if ($schemaVer < 8) {
-        try {
-            $db->exec("ALTER TABLE stock_log MODIFY change_type ENUM('import','manual_in','manual_out','adjust','scan_in','scan_out','damaged','repair','scan_undo_in','scan_undo_out','bom_out') NOT NULL");
-        } catch (\Throwable $e) {}
-        $db->prepare("UPDATE settings SET v='8' WHERE k='schema_version'")->execute();
-    }
-
-    // V9 升级：将 change_type 从 ENUM 改为 VARCHAR，避免新增类型时 1265 截断错误
-    if ($schemaVer < 9) {
-        try {
-            $db->exec("ALTER TABLE stock_log MODIFY change_type VARCHAR(30) NOT NULL");
-        } catch (\Throwable $e) {}
-        $db->prepare("UPDATE settings SET v='9' WHERE k='schema_version'")->execute();
-    }
-
-    // V10 升级：platforms 表添加 user_id，支持每个管理员独立管理平台
-    if ($schemaVer < 10) {
-        try {
-            $db->exec("ALTER TABLE platforms ADD COLUMN user_id INT NOT NULL DEFAULT 1");
-            $db->exec("ALTER TABLE platforms ADD INDEX idx_plat_user (user_id)");
-        } catch (\Throwable $e) {}
-        // 移除 code 的全局 UNIQUE 约束（改为应用层按 user_id 校验）
-        try { $db->exec("ALTER TABLE platforms DROP INDEX code"); } catch (\Throwable $e) {}
-        // 为所有现有子用户添加 can_scan 和 can_print 权限（保持原有功能可用）
-        $subUsers = $db->query("SELECT id, permissions FROM users WHERE role='user' AND parent_id IS NOT NULL")->fetchAll();
-        foreach ($subUsers as $su) {
-            $perms = json_decode($su['permissions'] ?? '[]', true);
-            if (!is_array($perms)) $perms = [];
-            if (!in_array('can_scan', $perms)) $perms[] = 'can_scan';
-            if (!in_array('can_print', $perms)) $perms[] = 'can_print';
-            $db->prepare("UPDATE users SET permissions=? WHERE id=?")
-               ->execute([json_encode($perms, JSON_UNESCAPED_UNICODE), $su['id']]);
-        }
-        $db->prepare("UPDATE settings SET v='10' WHERE k='schema_version'")->execute();
-    }
-
-    // V11: 用户角色重构 — 将无 parent_id 的 'user' 角色升级为 'admin'（删除普通用户角色）
-    if ($schemaVer < 11) {
-        $db->exec("UPDATE users SET role='admin' WHERE role='user' AND (parent_id IS NULL OR parent_id=0)");
-        $db->prepare("UPDATE settings SET v='11' WHERE k='schema_version'")->execute();
-    }
-
-    // V12: BOM管理 + 替代料 + 批量备注
-    if ($schemaVer < 12) {
-        // parts 表新增替代料字段
-        try { $db->exec("ALTER TABLE parts ADD COLUMN alternatives TEXT DEFAULT NULL AFTER remark"); } catch (Throwable $e) {}
-        // BOM项目表
-        $db->exec("CREATE TABLE IF NOT EXISTS bom_projects (
-            id          INT AUTO_INCREMENT PRIMARY KEY,
-            user_id     INT NOT NULL,
-            name        VARCHAR(200) NOT NULL,
-            description VARCHAR(500) DEFAULT '',
-            plat_id     INT DEFAULT 1,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_user (user_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-        // BOM明细表
-        $db->exec("CREATE TABLE IF NOT EXISTS bom_items (
-            id              INT AUTO_INCREMENT PRIMARY KEY,
-            project_id      INT NOT NULL,
-            part_id         INT DEFAULT NULL,
-            platform_part_no VARCHAR(100),
-            model           VARCHAR(200),
-            qty             INT NOT NULL DEFAULT 1,
-            matched         TINYINT DEFAULT 0,
-            sort_order      INT DEFAULT 0,
-            INDEX idx_project (project_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-        $db->prepare("UPDATE settings SET v='12' WHERE k='schema_version'")->execute();
-    }
-
-    // V13: 三级阈值优先级 + 用户设置 + 访问统计 + 在线用户
-    if ($schemaVer < 13) {
-        // 分类表新增低库存阈值列（NULL=继承全局）
-        try { $db->exec("ALTER TABLE categories ADD COLUMN low_stock_threshold INT DEFAULT NULL"); } catch (Throwable $e) {}
-        // users 表新增最后活动时间列（用于在线用户统计）
-        try { $db->exec("ALTER TABLE users ADD COLUMN last_activity DATETIME DEFAULT NULL"); } catch (Throwable $e) {}
-        // 用户级设置表（普通管理员的全局阈值、子用户公告等）
-        $db->exec("CREATE TABLE IF NOT EXISTS user_settings (
-            user_id INT NOT NULL,
-            k       VARCHAR(100) NOT NULL,
-            v       TEXT,
-            PRIMARY KEY (user_id, k)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-        // 每日访问统计
-        $db->exec("CREATE TABLE IF NOT EXISTS daily_stats (
-            stat_date    DATE PRIMARY KEY,
-            total_visits INT DEFAULT 0,
-            unique_ips   INT DEFAULT 0,
-            updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-        // 每日IP记录（用于统计独立IP数）
-        $db->exec("CREATE TABLE IF NOT EXISTS daily_ip_log (
-            id        INT AUTO_INCREMENT PRIMARY KEY,
-            stat_date DATE NOT NULL,
-            ip        VARCHAR(45) NOT NULL,
-            UNIQUE KEY uk_date_ip (stat_date, ip)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-        $db->prepare("UPDATE settings SET v='13' WHERE k='schema_version'")->execute();
-    }
-
-    // V14: parts 表新增 parameters 字段（存储元件参数/Value，如阻值、容值等）
-    if ($schemaVer < 14) {
-        try { $db->exec("ALTER TABLE parts ADD COLUMN parameters VARCHAR(500) DEFAULT '' AFTER location"); } catch (Throwable $e) {}
-        $db->prepare("UPDATE settings SET v='14' WHERE k='schema_version'")->execute();
-    }
-
-    // 分类表
+    // ── 分类表 ──
     $db->exec("CREATE TABLE IF NOT EXISTS categories (
-        id      INT AUTO_INCREMENT PRIMARY KEY,
-        user_id INT NOT NULL,
-        name    VARCHAR(100) NOT NULL,
+        id        INT AUTO_INCREMENT PRIMARY KEY,
+        user_id   INT NOT NULL,
+        parent_id INT DEFAULT NULL,
+        name      VARCHAR(100) NOT NULL,
+        low_stock_threshold INT DEFAULT NULL,
         UNIQUE KEY uq_user_cat (user_id, name),
-        INDEX idx_user (user_id)
+        INDEX idx_user (user_id),
+        INDEX idx_parent (parent_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 元件主表
+    // ── 元件主表 ──
     $db->exec("CREATE TABLE IF NOT EXISTS parts (
         id                  INT AUTO_INCREMENT PRIMARY KEY,
         user_id             INT NOT NULL,
         platform_id         INT DEFAULT 1,
+        internal_id         INT NOT NULL DEFAULT 0,
         platform_part_no    VARCHAR(100),
         customer_part_no    VARCHAR(100),
         model               VARCHAR(200),
@@ -343,23 +211,30 @@ function initDB(): void {
         brand               VARCHAR(100),
         stock               INT DEFAULT 0,
         damaged             INT DEFAULT 0,
+        avg_cost            DECIMAL(10,4) DEFAULT 0,
         low_stock_threshold INT DEFAULT 10,
         location            VARCHAR(200) DEFAULT '',
         parameters          VARCHAR(500) DEFAULT '',
+        purchase_url        VARCHAR(500) DEFAULT '',
+        linked_part_id      INT DEFAULT NULL,
         remark              TEXT,
+        alternatives        TEXT DEFAULT NULL,
+        is_incomplete       TINYINT NOT NULL DEFAULT 0,
+        create_time         DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time         DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_user_platform_part (user_id, platform_id, platform_part_no),
+        UNIQUE KEY uq_user_internal (user_id, internal_id),
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 元件-分类 多对多
+    // ── 元件-分类 多对多 ──
     $db->exec("CREATE TABLE IF NOT EXISTS part_categories (
         part_id     INT NOT NULL,
         category_id INT NOT NULL,
         PRIMARY KEY (part_id, category_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 价格历史
+    // ── 价格历史（辅助数据，订单导入时同步写入）──
     $db->exec("CREATE TABLE IF NOT EXISTS price_history (
         id               INT AUTO_INCREMENT PRIMARY KEY,
         user_id          INT NOT NULL,
@@ -374,7 +249,7 @@ function initDB(): void {
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 出入库日志
+    // ── 出入库日志（资产统计核心表）──
     $db->exec("CREATE TABLE IF NOT EXISTS stock_log (
         id               INT AUTO_INCREMENT PRIMARY KEY,
         user_id          INT NOT NULL,
@@ -384,13 +259,17 @@ function initDB(): void {
         qty_change       INT NOT NULL,
         qty_before       INT NOT NULL,
         qty_after        INT NOT NULL,
+        unit_cost        DECIMAL(10,4) DEFAULT 0,
+        is_sample        TINYINT(1) NOT NULL DEFAULT 0,
+        subtotal         DECIMAL(12,4) DEFAULT 0,
+        order_time       DATETIME DEFAULT NULL,
         remark           VARCHAR(500),
         create_time      DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_part (part_id),
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 扫码日志
+    // ── 扫码日志 ──
     $db->exec("CREATE TABLE IF NOT EXISTS scan_log (
         id               INT AUTO_INCREMENT PRIMARY KEY,
         user_id          INT NOT NULL,
@@ -406,7 +285,7 @@ function initDB(): void {
         INDEX idx_part (part_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 备份日志
+    // ── 备份日志 ──
     $db->exec("CREATE TABLE IF NOT EXISTS backup_log (
         id         INT AUTO_INCREMENT PRIMARY KEY,
         user_id    INT NOT NULL,
@@ -417,7 +296,7 @@ function initDB(): void {
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 导入历史
+    // ── 导入历史 ──
     $db->exec("CREATE TABLE IF NOT EXISTS import_history (
         id               INT AUTO_INCREMENT PRIMARY KEY,
         user_id          INT NOT NULL,
@@ -427,7 +306,7 @@ function initDB(): void {
         UNIQUE KEY uq_user_order_part (user_id, order_no, platform_part_no)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 已导入文件记录
+    // ── 已导入文件记录 ──
     $db->exec("CREATE TABLE IF NOT EXISTS imported_files (
         id          INT AUTO_INCREMENT PRIMARY KEY,
         user_id     INT NOT NULL,
@@ -442,7 +321,7 @@ function initDB(): void {
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 导入错误日志
+    // ── 导入错误日志 ──
     $db->exec("CREATE TABLE IF NOT EXISTS import_errors (
         id          INT AUTO_INCREMENT PRIMARY KEY,
         user_id     INT NOT NULL,
@@ -455,7 +334,32 @@ function initDB(): void {
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // BOM出库记录
+    // ── BOM项目表 ──
+    $db->exec("CREATE TABLE IF NOT EXISTS bom_projects (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        user_id     INT NOT NULL,
+        name        VARCHAR(200) NOT NULL,
+        description VARCHAR(500) DEFAULT '',
+        plat_id     INT DEFAULT 1,
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // ── BOM明细表 ──
+    $db->exec("CREATE TABLE IF NOT EXISTS bom_items (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        project_id      INT NOT NULL,
+        part_id         INT DEFAULT NULL,
+        platform_part_no VARCHAR(100),
+        model           VARCHAR(200),
+        qty             INT NOT NULL DEFAULT 1,
+        matched         TINYINT DEFAULT 0,
+        sort_order      INT DEFAULT 0,
+        INDEX idx_project (project_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // ── BOM出库记录 ──
     $db->exec("CREATE TABLE IF NOT EXISTS bom_exports (
         id          INT AUTO_INCREMENT PRIMARY KEY,
         user_id     INT NOT NULL,
@@ -469,22 +373,192 @@ function initDB(): void {
         INDEX idx_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 后台操作日志
-    $db->exec("CREATE TABLE IF NOT EXISTS admin_log (
-        id         INT AUTO_INCREMENT PRIMARY KEY,
-        user_id    INT,
-        action     VARCHAR(200),
-        detail     TEXT,
-        ip         VARCHAR(45),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    // ── 用户级设置表 ──
+    $db->exec("CREATE TABLE IF NOT EXISTS user_settings (
+        user_id INT NOT NULL,
+        k       VARCHAR(100) NOT NULL,
+        v       TEXT,
+        PRIMARY KEY (user_id, k)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    // 创建默认管理员
+    // ── 每日访问统计 ──
+    $db->exec("CREATE TABLE IF NOT EXISTS daily_stats (
+        stat_date    DATE PRIMARY KEY,
+        total_visits INT DEFAULT 0,
+        unique_ips   INT DEFAULT 0,
+        updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // ── 每日IP记录 ──
+    $db->exec("CREATE TABLE IF NOT EXISTS daily_ip_log (
+        id        INT AUTO_INCREMENT PRIMARY KEY,
+        stat_date DATE NOT NULL,
+        ip        VARCHAR(45) NOT NULL,
+        UNIQUE KEY uk_date_ip (stat_date, ip)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // ── 操作溯源追责日志（全系统写操作留存）──
+    $db->exec("CREATE TABLE IF NOT EXISTS trace_log (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        user_id     INT NOT NULL DEFAULT 0,
+        action      VARCHAR(100) NOT NULL,
+        target_type VARCHAR(50) NOT NULL DEFAULT '',
+        target_id   INT NOT NULL DEFAULT 0,
+        detail      TEXT,
+        ip          VARCHAR(45),
+        created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_user (user_id),
+        INDEX idx_action (action),
+        INDEX idx_target (target_type, target_id),
+        INDEX idx_time (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // ── 默认配置插入 ──
+    $defaults = [
+        'site_title'        => '元件库存管理',
+        'site_logo'         => '',
+        'register_mode'     => 'closed',
+        'notice_content'    => '',
+        'notice_show_mode'  => 'once',
+        'default_low_stock' => '10',
+        'theme_default'     => 'dark',
+        'session_timeout'   => '0',
+    ];
+    foreach ($defaults as $k => $v) {
+        $db->prepare("INSERT IGNORE INTO settings (k,v) VALUES (?,?)")->execute([$k,$v]);
+    }
+
+    // ── 默认平台（仅首次初始化时插入）──
+    $platCount = (int)$db->query("SELECT COUNT(*) FROM platforms")->fetchColumn();
+    if ($platCount === 0) {
+        $db->exec("INSERT INTO platforms (user_id,code,name,url_template,is_default,platform_type) VALUES
+            (1,'lcsc','立创商城','https://so.szlcsc.com/global.html?k={part_no}',1,'standard'),
+            (1,'other','其他','',0,'standard')");
+    }
+
+    // ── 默认管理员（仅首次初始化时创建）──
     $existing = $db->query("SELECT COUNT(*) FROM users")->fetchColumn();
     if ((int)$existing === 0) {
         $hash = password_hash('admin', PASSWORD_DEFAULT);
         $db->prepare("INSERT INTO users (username,password_hash,role,must_change_pw) VALUES (?,?,?,?)")
            ->execute(['admin', $hash, 'admin', 1]);
+    }
+
+    // 【测试/兼容残留，当前功能定型无需使用，可后续手动移除】
+    // 以下迁移代码对 v1.1.0 正式版数据库永远不会执行（is_incomplete 字段已在 CREATE TABLE parts 中定义）；
+    // 仅在 fresh install 时用于创建 idx_incomplete 索引（索引未在 CREATE TABLE 中定义）。
+    // 如需彻底移除，请先将 idx_incomplete 索引定义补入 CREATE TABLE parts 语句中。
+    $cols = $db->query("SHOW COLUMNS FROM parts LIKE 'is_incomplete'")->fetchAll();
+    if (empty($cols)) {
+        $db->exec("ALTER TABLE parts ADD COLUMN is_incomplete TINYINT NOT NULL DEFAULT 0 AFTER alternatives");
+    }
+    $idx = $db->query("SHOW INDEX FROM parts WHERE Key_name='idx_incomplete'")->fetchAll();
+    if (empty($idx)) {
+        $db->exec("ALTER TABLE parts ADD INDEX idx_incomplete (user_id, is_incomplete)");
+    }
+}
+
+// ── API 统一响应函数（v1.1.0 正式版标准）─────────────────────
+/**
+ * API 入口统一引导：清空缓冲区、固定 JSON 响应头、注册全局异常/错误捕获
+ * 所有 API 入口文件（api.php / action.php / detail_ajax.php 等）在 require config.php 之后立即调用本函数。
+ * 本函数仅做请求预处理，不处理鉴权与 CSRF（鉴权由 requireLogin/ajaxRequireLogin 负责）。
+ * 对于双模式入口（如 action.php），非 AJAX 请求仅清空缓冲区，不强制 JSON 头与异常捕获，
+ * 以保留 PHP 全页提交回退（JS 禁用时正常重定向）。
+ */
+function apiBootstrap(): void {
+    // 清空前序缓冲区，避免任何 PHP 警告/HTML 污染响应
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    ob_start();
+    header_remove('X-Powered-By');
+    // 非 AJAX 请求（表单全页提交回退）：仅清空缓冲区，保留正常 HTML/重定向行为
+    if (!isAjaxRequest()) {
+        return;
+    }
+    // AJAX 请求：强制 JSON 响应头 + 全局异常/错误捕获
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('X-Content-Type-Options: nosniff');
+    // 全局异常捕获：Throwable -> 标准 JSON 错误响应（不输出 PHP 报错/HTML）
+    set_exception_handler(function (Throwable $e): void {
+        error_log('[API Exception] ' . $e->getMessage() . "\n" . $e->getTraceAsString());
+        if (!headers_sent()) {
+            header('Content-Type: application/json; charset=utf-8');
+            header('Cache-Control: no-store, no-cache, must-revalidate');
+        }
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        echo json_encode([
+            'code' => 1,
+            'msg'  => '服务器内部错误，请稍后重试',
+            'data' => [],
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    });
+    // 全局错误捕获：将 fatal error 转为 JSON
+    register_shutdown_function(function (): void {
+        $err = error_get_last();
+        if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            error_log('[API Fatal] ' . $err['message'] . ' @ ' . ($err['file'] ?? '') . ':' . ($err['line'] ?? ''));
+            if (!headers_sent()) {
+                header('Content-Type: application/json; charset=utf-8');
+                header('Cache-Control: no-store, no-cache, must-revalidate');
+            }
+            while (ob_get_level() > 0) { ob_end_clean(); }
+            echo json_encode([
+                'code' => 1,
+                'msg'  => '服务器内部错误，请稍后重试',
+                'data' => [],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    });
+}
+
+/**
+ * 统一 JSON 成功响应
+ * @param array $data 返回数据
+ * @param string $msg 提示信息
+ */
+function jsonResponse(array $data = [], string $msg = '操作成功'): void {
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    echo json_encode(['code' => 0, 'msg' => $msg, 'data' => $data], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP);
+    exit;
+}
+
+/**
+ * 统一 JSON 错误响应
+ * @param string $msg 错误信息
+ * @param int $code 错误码（非0）
+ * @param array $data 附加数据（如表单验证错误详情）
+ */
+function jsonError(string $msg = '操作失败', int $code = 1, array $data = []): void {
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    echo json_encode(['code' => $code, 'msg' => $msg, 'data' => $data], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP);
+    exit;
+}
+
+/** 判断当前请求是否为 AJAX（前端通过 header 或 POST 参数标识） */
+function isAjaxRequest(): bool {
+    return ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest'
+        || ($_POST['ajax'] ?? '') === '1'
+        || ($_GET['ajax'] ?? '') === '1';
+}
+
+/** CSRF 校验（AJAX 模式返回 JSON 错误，普通模式跳转） */
+function verifyCsrfSafe(): void {
+    $stored = $_SESSION['csrf'] ?? '';
+    $supplied = $_POST['_csrf'] ?? $_GET['_csrf'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+    if ($stored === '' || $supplied === '' || !hash_equals($stored, $supplied)) {
+        if (isAjaxRequest()) {
+            jsonError('CSRF校验失败，请刷新页面重试', 403);
+        }
+        header('Cache-Control: no-store, no-cache, must-revalidate');
+        header('Location: login.php?reason=csrf');
+        exit;
     }
 }
 
@@ -523,6 +597,17 @@ function sendSecurityHeaders(): void {
 // ── 安全辅助 ───────────────────────────────────────────
 function h(mixed $v): string {
     return htmlspecialchars((string)($v ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+/**
+ * 商品编号渲染：检测 #数字内部 格式，把"内部"用小字号显示（便于区分自动生成编号）
+ * 用于列表/详情页展示，数据库中存储原始字符串（如 #5内部）
+ */
+function formatPpn(string $ppn): string {
+    if ($ppn !== '' && preg_match('/^(#\d+)内部$/', $ppn, $m)) {
+        return h($m[1]) . '<small style="font-size:10px;color:var(--text3);font-weight:normal;">内部</small>';
+    }
+    return h($ppn);
 }
 
 /** 获取客户端真实IP（仅信任可信反向代理头） */
@@ -600,7 +685,10 @@ function verifyCsrf(): void {
     $supplied = $_POST['_csrf'] ?? '';
     // 防止空串绕过：hash_equals('', '') 返回 true
     if ($stored === '' || $supplied === '' || !hash_equals($stored, $supplied)) {
-        http_response_code(403); die('CSRF verification failed');
+        // CSRF失效 → 跳转登录页，不销毁session避免影响其他标签页
+        header('Cache-Control: no-store, no-cache, must-revalidate');
+        header('Location: login.php?reason=csrf');
+        exit;
     }
 }
 
@@ -611,10 +699,50 @@ function currentUser(): ?array {
 
 function requireLogin(): array {
     $u = currentUser();
-    if (!$u) { header('Location: login.php'); exit; }
+    if (!$u) {
+        // 会话超时或未登录
+        $isTimeout = isset($_SESSION['timeout_notice']);
+        unset($_SESSION['timeout_notice']);
+        // AJAX 请求：统一返回 JSON 鉴权失败响应（前端拦截器会弹超时弹窗）
+        // 避免浏览器跟随 302 重定向到 login.php 导致前端收到 HTML 触发 "Unexpected token '<'"
+        if (isAjaxRequest()) {
+            header('Content-Type: application/json; charset=utf-8');
+            header('Cache-Control: no-store, no-cache, must-revalidate');
+            echo json_encode([
+                'code' => 403,
+                'msg'  => $isTimeout ? '会话已超时，请重新登录' : '请先登录',
+                'data' => ['auth' => false, 'timeout' => $isTimeout],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        // 非 AJAX：跳转登录页
+        header('Cache-Control: no-store, no-cache, must-revalidate');
+        header('Location: login.php' . ($isTimeout ? '?reason=timeout' : ''));
+        exit;
+    }
     if ($u['must_change_pw']) { header('Location: change_password.php'); exit; }
     trackVisit();
     updateUserActivity();
+    return $u;
+}
+
+/** AJAX 接口鉴权失败统一返回 JSON，前端通过全局拦截器弹出超时弹窗
+ *  响应格式：{code:403, msg, data:{auth:false, timeout}}
+ */
+function ajaxRequireLogin(): array {
+    $u = currentUser();
+    if (!$u) {
+        $isTimeout = isset($_SESSION['timeout_notice']);
+        unset($_SESSION['timeout_notice']);
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate');
+        echo json_encode([
+            'code' => 403,
+            'msg'  => $isTimeout ? '会话已超时，请重新登录' : '请先登录',
+            'data' => ['auth' => false, 'timeout' => $isTimeout],
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     return $u;
 }
 
@@ -644,8 +772,8 @@ function ensureUserPlatforms(int $adminUid): void {
     $stmt = $db->prepare("SELECT COUNT(*) FROM platforms WHERE user_id=?");
     $stmt->execute([$adminUid]);
     if ((int)$stmt->fetchColumn() === 0) {
-        $db->prepare("INSERT INTO platforms (user_id,code,name,url_template,is_default) VALUES (?, 'lcsc', '立创商城', 'https://so.szlcsc.com/global.html?k={part_no}', 1)")->execute([$adminUid]);
-        $db->prepare("INSERT INTO platforms (user_id,code,name,url_template,is_default) VALUES (?, 'other', '其他', '', 0)")->execute([$adminUid]);
+        $db->prepare("INSERT INTO platforms (user_id,code,name,url_template,is_default,platform_type) VALUES (?, 'lcsc', '立创商城', 'https://so.szlcsc.com/global.html?k={part_no}', 1, 'standard')")->execute([$adminUid]);
+        $db->prepare("INSERT INTO platforms (user_id,code,name,url_template,is_default,platform_type) VALUES (?, 'other', '其他', '', 0, 'standard')")->execute([$adminUid]);
     }
 }
 
@@ -668,15 +796,6 @@ function getUserPermissions(): array {
 /** 检查当前用户是否有某项权限 */
 function hasPermission(string $perm): bool {
     return in_array($perm, getUserPermissions(), true);
-}
-
-/** 检查当前用户是否有任意一项权限 */
-function hasAnyPermission(string ...$perms): bool {
-    $userPerms = getUserPermissions();
-    foreach ($perms as $p) {
-        if (in_array($p, $userPerms, true)) return true;
-    }
-    return false;
 }
 
 /** 是否为系统主管理员（id=1，第一个注册用户，拥有系统设置权限） */
@@ -714,7 +833,9 @@ function getSetting(string $k, string $default = ''): string {
     if (!isset($cache[$k])) {
         $s = getDB()->prepare("SELECT v FROM settings WHERE k=?");
         $s->execute([$k]);
-        $cache[$k] = $s->fetchColumn() ?: $default;
+        $col = $s->fetchColumn();
+        // 显式区分「未命中（false）」与「值为 '0'」，避免 ?: 把 '0' 当作 falsy 误用默认值
+        $cache[$k] = ($col === false || $col === null) ? $default : (string)$col;
     }
     return (string)$cache[$k];
 }
@@ -731,7 +852,8 @@ function getUserSetting(int $uid, string $k, string $default = ''): string {
     if (!isset($cache[$ck])) {
         $s = getDB()->prepare("SELECT v FROM user_settings WHERE user_id=? AND k=?");
         $s->execute([$uid, $k]);
-        $cache[$ck] = $s->fetchColumn() ?: $default;
+        $col = $s->fetchColumn();
+        $cache[$ck] = ($col === false || $col === null) ? $default : (string)$col;
     }
     return (string)$cache[$ck];
 }
@@ -741,8 +863,164 @@ function setUserSetting(int $uid, string $k, string $v): void {
            ->execute([$uid, $k, $v, $v]);
 }
 
+// ── 线上版本校验（双仓库择优，仅读取版本信息，不自动更新代码）──
+// 安全限制：域名白名单，仅允许双仓库域名
+const VERSION_DOMAIN_WHITELIST = ['gitee.com', 'raw.githubusercontent.com', 'github.com'];
+// 安全限制：内置 PGP 公钥（需要 gnupg 扩展验证签名，当前预留未启用）
+// const VERSION_PGP_PUBLIC_KEY = '-----BEGIN PGP PUBLIC KEY BLOCK-----';
+
+/**
+ * 解析 CHANGELOG.md 并按版本范围过滤
+ * 仅返回 currentVer < sectionVer <= remoteVer 的版本段落
+ * CHANGELOG.md 格式：
+ *   ## v1.1.0 (2026-07-18)
+ *   ### 新增
+ *   - 功能A
+ *   ### 优化
+ *   - 优化B
+ */
+function filterChangelogByVersion(string $changelog, string $currentVer, string $remoteVer): string {
+    if ($changelog === '' || $currentVer === '' || $remoteVer === '') return '';
+    // 按版本标题拆分段落（## vX.Y.Z 或 ## X.Y.Z）
+    $pattern = '/^##\s+v?(\d+\.\d+\.\d+)\b[^\n]*$/m';
+    if (!preg_match_all($pattern, $changelog, $matches, PREG_OFFSET_CAPTURE)) return '';
+    $sections = [];
+    for ($i = 0; $i < count($matches[0]); $i++) {
+        $ver   = $matches[1][$i][0];
+        $start = (int)$matches[0][$i][1];
+        $end   = ($i + 1 < count($matches[0])) ? (int)$matches[0][$i + 1][1] : strlen($changelog);
+        $body  = substr($changelog, $start, $end - $start);
+        $sections[] = ['ver' => $ver, 'body' => $body];
+    }
+    // 过滤：current < version <= remote
+    $filtered = [];
+    foreach ($sections as $s) {
+        if (version_compare($s['ver'], $currentVer, '>') && version_compare($s['ver'], $remoteVer, '<=')) {
+            $filtered[] = trim($s['body']);
+        }
+    }
+    return $filtered ? implode("\n\n---\n\n", $filtered) : '';
+}
+
+function checkRemoteVersion(): array {
+    if (!function_exists('curl_init')) {
+        return ['ok' => false, 'error' => '服务器未安装 cURL 扩展，无法检测版本'];
+    }
+    // 双静态仓库：Gitee 国内 + GitHub 海外
+    $repos = [
+        'gitee' => [
+            'version'   => 'https://gitee.com/xiaoxu798/lcsc/raw/master/version.json',
+            'changelog' => 'https://gitee.com/xiaoxu798/lcsc/raw/master/CHANGELOG.md',
+            'release'   => 'https://gitee.com/xiaoxu798/lcsc/releases',
+        ],
+        'github' => [
+            'version'   => 'https://raw.githubusercontent.com/xiaoxu798/lcsc/main/version.json',
+            'changelog' => 'https://raw.githubusercontent.com/xiaoxu798/lcsc/main/CHANGELOG.md',
+            'release'   => 'https://github.com/xiaoxu798/lcsc/releases',
+        ],
+    ];
+    // 缓存破坏参数
+    $cacheBust = '?_t=' . time();
+    // 并行请求两个仓库的 version.json
+    $mh = curl_multi_init();
+    $handles = [];
+    foreach ($repos as $key => $repo) {
+        $url = $repo['version'] . $cacheBust;
+        // 域名白名单校验
+        $host = parse_url($url, PHP_URL_HOST);
+        if (!$host || !in_array($host, VERSION_DOMAIN_WHITELIST, true)) continue;
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 8,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_USERAGENT      => 'LCSC-Inventory/' . APP_VERSION,
+            CURLOPT_HTTPHEADER     => ['Cache-Control: no-cache', 'Pragma: no-cache'],
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        curl_multi_add_handle($mh, $ch);
+        $handles[$key] = $ch;
+    }
+    if (empty($handles)) {
+        return ['ok' => false, 'error' => '无可用版本源（域名白名单校验失败）'];
+    }
+    // 执行并行请求
+    do {
+        $status = curl_multi_exec($mh, $active);
+        if ($active) curl_multi_select($mh, 1);
+    } while ($active && $status === CURLM_OK);
+    // 收集结果，选择延迟更低的仓库
+    $bestSource = null;
+    $bestData = null;
+    $bestTime = PHP_FLOAT_MAX;
+    $errors = [];
+    foreach ($handles as $key => $ch) {
+        $data = curl_multi_getcontent($ch);
+        $time = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_multi_remove_handle($mh, $ch);
+        if ($err === '' && $code === 200 && $data !== false) {
+            if ($time < $bestTime) {
+                $bestTime = $time;
+                $bestSource = $key;
+                $bestData = $data;
+            }
+        } else {
+            $errors[] = $key . ': ' . ($err ?: 'HTTP ' . $code);
+        }
+    }
+    curl_multi_close($mh);
+    if ($bestSource === null) {
+        return ['ok' => false, 'error' => '双仓库均访问失败 (' . implode('; ', $errors) . ')'];
+    }
+    $data = json_decode($bestData, true);
+    if (!is_array($data) || empty($data['version'])) {
+        return ['ok' => false, 'error' => '版本文件格式无效（需 JSON 含 version 字段）'];
+    }
+    $remoteVer = (string)$data['version'];
+    $hasUpdate = version_compare($remoteVer, APP_VERSION, '>');
+    $releaseUrl = $repos[$bestSource]['release'];
+    // 有新版本时拉取更新日志 CHANGELOG.md，并按版本范围过滤
+    $changelog = '';
+    if ($hasUpdate) {
+        $clUrl = $repos[$bestSource]['changelog'] . $cacheBust;
+        $clCh = curl_init($clUrl);
+        curl_setopt_array($clCh, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 8,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_USERAGENT      => 'LCSC-Inventory/' . APP_VERSION,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+        $rawChangelog = (string)curl_exec($clCh);
+        if (curl_error($clCh)) {
+            $changelog = '';
+        } else {
+            // 仅展示用户当前版本到线上新版本之间的改动
+            $changelog = filterChangelogByVersion($rawChangelog, APP_VERSION, $remoteVer);
+            if ($changelog === '') {
+                // 解析为空时回退为原始日志（容错）
+                $changelog = $rawChangelog;
+            }
+        }
+        curl_close($clCh);
+    }
+    return [
+        'ok'          => true,
+        'has_update'  => $hasUpdate,
+        'current'     => APP_VERSION,
+        'remote'      => $remoteVer,
+        'changelog'   => $changelog,
+        'release_url' => $releaseUrl,
+        'source'      => $bestSource,
+    ];
+}
+
 // ── 获取生效的低库存阈值（三级优先级：单品 > 分类 > 全局）──
-function getGlobalThreshold(int $dataUid): int {
+function getGlobalThreshold(): int {
     // 普通管理员有自己的全局阈值，超级管理员用系统设置
     $user = currentUser();
     if ($user && $user['role'] === 'admin' && !isPrimaryAdmin()) {
@@ -782,9 +1060,46 @@ function updateUserActivity(): void {
     } catch (Throwable $e) {}
 }
 
-function adminLog(int $userId, string $action, string $detail = ''): void {
-    getDB()->prepare("INSERT INTO admin_log (user_id,action,detail,ip) VALUES (?,?,?,?)")
-           ->execute([$userId, $action, $detail, getClientIP()]);
+/**
+ * 操作溯源日志（全系统写操作留存，用于追责）
+ *
+ * @param int    $userId      操作用户ID（子用户传其自身ID，非dataUid）
+ * @param string $action      动作标识（如 add_part/edit_part/delete_part/scan_in/scan_out）
+ * @param string $targetType  目标业务类型（如 part/stock_log/platform/user/invite/category/platform等）
+ * @param int    $targetId    目标业务ID（无则传0）
+ * @param string $detail      详情（人类可读，包含关键参数）
+ */
+function traceLog(int $userId, string $action, string $targetType, int $targetId, string $detail = ''): void {
+    try {
+        getDB()->prepare("INSERT INTO trace_log (user_id,action,target_type,target_id,detail,ip) VALUES (?,?,?,?,?,?)")
+               ->execute([$userId, $action, $targetType, $targetId, $detail, getClientIP()]);
+    } catch (\Throwable $e) {
+        // 溯源日志写入失败不应影响主业务流程
+        error_log('traceLog failed: ' . $e->getMessage());
+    }
+}
+
+/**
+ * 获取操作记录最低留存天数（全系统统一，最小7天）
+ * 主管理员设置 → settings.retention_days；未设置或小于7则返回7
+ */
+function getRetentionDays(): int {
+    $days = (int)getSetting('retention_days', '30');
+    if ($days < 7) $days = 7;
+    return $days;
+}
+
+/**
+ * 检查某条记录是否已过留存期（允许删除）
+ *
+ * @param string $dateTime 记录的创建时间（Y-m-d H:i:s 格式）
+ * @return bool true=已过留存期可删除，false=未到期禁止删除
+ */
+function isRetentionExpired(string $dateTime): bool {
+    if ($dateTime === '') return true;
+    $days = getRetentionDays();
+    $cutoff = date('Y-m-d H:i:s', time() - $days * 86400);
+    return strcmp($dateTime, $cutoff) < 0;
 }
 
 // ── 分类辅助 ───────────────────────────────────────────
@@ -802,7 +1117,7 @@ function getOrCreateCategory(int $userId, string $name): int {
     $stmt->execute([$userId, $hex]);
     $row  = $stmt->fetch();
     if ($row) return (int)$row['id'];
-    $db->prepare("INSERT INTO categories (user_id,name) VALUES (?,UNHEX(?))")->execute([$userId, $hex]);
+    $db->prepare("INSERT INTO categories (user_id,parent_id,name) VALUES (?,0,UNHEX(?))")->execute([$userId, $hex]);
     return (int)$db->lastInsertId();
 }
 
@@ -830,6 +1145,34 @@ function platformUrl(string $urlTemplate, string $partNo): string {
     // 仅允许 http/https 协议，防止 javascript: 等危险协议
     if (!preg_match('#^https?://#i', $urlTemplate)) return '';
     return str_replace('{part_no}', urlencode($partNo), $urlTemplate);
+}
+
+/**
+ * 清理替代料双向关联：从其他物料的 alternatives 字段中移除被删除的 part_id
+ * 用于部件删除/批量删除时保持关联数据一致性
+ */
+function cleanupAlternativesReverseLinks(array $deletedIds, int $dataUid): void {
+    if (empty($deletedIds)) return;
+    try {
+        $db = getDB();
+        $delIdStr = array_map('strval', $deletedIds);
+        // 查找 alternatives 字段中包含被删除 ID 的所有物料
+        // 使用 LIKE 模糊匹配，然后精确过滤
+        foreach ($delIdStr as $delId) {
+            // 匹配 "id," 或 ",id" 或 "id"（独立）或 ",id,"
+            $likePattern = '%'.$delId.'%';
+            $stmt = $db->prepare("SELECT id, alternatives FROM parts WHERE user_id=? AND alternatives LIKE ?");
+            $stmt->execute([$dataUid, $likePattern]);
+            foreach ($stmt->fetchAll() as $row) {
+                $altList = array_filter(array_map('trim', explode(',', (string)$row['alternatives'])));
+                $newList = array_values(array_diff($altList, [$delId]));
+                if (count($newList) !== count($altList)) {
+                    $db->prepare("UPDATE parts SET alternatives=? WHERE id=? AND user_id=?")
+                       ->execute([implode(',', $newList), $row['id'], $dataUid]);
+                }
+            }
+        }
+    } catch (Throwable $e) {}
 }
 
 /** 密码强度校验：至少 8 位，包含大小写字母、数字、特殊字符中的 3 种 */

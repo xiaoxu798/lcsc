@@ -14,19 +14,24 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $stored = $_SESSION['csrf'] ?? '';
 $supplied = $_POST['_csrf'] ?? '';
 if ($stored === '' || $supplied === '' || !hash_equals($stored, $supplied)) {
-    http_response_code(403);
-    exit('CSRF verification failed');
+    // CSRF失效时也执行完整销毁（防止残留旧会话）
+    destroySession();
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Location: login.php');
+    exit;
 }
 
-// 彻底清除 session
-$_SESSION = [];
-if (ini_get("session.use_cookies")) {
-    $params = session_get_cookie_params();
-    setcookie(session_name(), '', time() - 42000,
-        $params["path"], $params["domain"],
-        $params["secure"], $params["httponly"]
-    );
+// 记录登出溯源日志（在销毁会话前捕获 user_id）
+$logoutUid = (int)($_SESSION['user_id'] ?? 0);
+if ($logoutUid > 0) {
+    traceLog($logoutUid, 'logout', 'user', $logoutUid, '用户登出');
 }
-session_destroy();
+
+// 统一调用全局会话销毁函数
+destroySession();
+// 清除「记住我」cookie
+$isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? 0) == 443);
+setcookie('remember_me', '', time() - 42000, '/', '', $isHttps, true);
+header('Cache-Control: no-store, no-cache, must-revalidate');
 header('Location: login.php');
 exit;

@@ -23,11 +23,6 @@ if ($scanError !== null) {
 // ── 闪存消息 ──
 $flash = $_GET['flash'] ?? null;
 
-// ── 平台列表 ──
-$platStmt = $db->prepare("SELECT id, code, name, is_default FROM platforms WHERE user_id=? ORDER BY id ASC");
-$platStmt->execute([$dataUid]);
-$platforms = $platStmt->fetchAll();
-
 // ── 今日扫码统计 ──
 $today = date('Y-m-d');
 $todayStats = $db->prepare("SELECT scan_type, COUNT(*) as cnt, SUM(qty) as total_qty FROM scan_log WHERE user_id=? AND DATE(created_at)=? GROUP BY scan_type");
@@ -39,12 +34,12 @@ foreach ($todayStats as $ts) {
     if ($ts['scan_type'] === 'out') { $todayOut = (int)$ts['cnt']; $todayOutQty = (int)$ts['total_qty']; }
 }
 
-// ── 最近扫描记录 ──
+// ── 最近扫描记录（仅当日） ──
 $recentScans = $db->prepare(
     "SELECT sl.*, p.model
      FROM scan_log sl
      LEFT JOIN parts p ON p.id = sl.part_id
-     WHERE sl.user_id = ?
+     WHERE sl.user_id = ? AND DATE(sl.created_at) = CURDATE()
      ORDER BY sl.created_at DESC
      LIMIT 30"
 );
@@ -59,17 +54,14 @@ require 'layout_head.php';
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script src="scan_decoder.js"></script>
 <style>
-/* ── 扫码模式切换 ── */
-.scan-mode-bar{display:flex;gap:4px;margin-bottom:14px;}
-.scan-mode-bar .pill{flex:1;text-align:center;justify-content:center;font-size:14px;padding:10px 16px;font-weight:500;transition:all .2s;}
-.scan-mode-bar .pill.in-pill{background:var(--green-dim);color:var(--green);border-color:var(--green);}
-.scan-mode-bar .pill.out-pill{background:var(--red-dim);color:var(--red);border-color:var(--red);}
-.scan-mode-bar .pill.in-pill.active{background:var(--green);color:#fff;box-shadow:0 0 12px rgba(34,197,94,.4);}
-.scan-mode-bar .pill.out-pill.active{background:var(--red);color:#fff;box-shadow:0 0 12px rgba(239,68,68,.4);}
+/* ════════════════════════════════════════════════════════════════
+   扫码页CSS — 三层架构：基础共享 + PC断点 + 移动端断点
+   ════════════════════════════════════════════════════════════════ */
 
-/* ── 设备状态栏 ── */
+/* ── 1. 基础层：两端共享属性（颜色、边框、圆角、布局）── */
+/* 设备状态栏 */
 .device-status-bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;font-size:12px;}
-.device-status{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);cursor:pointer;transition:all .15s;}
+.device-status{display:flex;align-items:center;gap:6px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);cursor:pointer;transition:all .15s;}
 .device-status:hover{border-color:var(--accent);}
 .device-status .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
 .device-status .dot.ok{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,.5);}
@@ -80,156 +72,170 @@ require 'layout_head.php';
 .device-status .ds-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;padding:0 4px;font-family:inherit;}
 .device-status .ds-btn:hover{text-decoration:underline;}
 
-/* ── 扫描输入区 ── */
-.scan-input-area{position:relative;margin-bottom:12px;display:flex;gap:0;}
-.scan-input-area input{font-size:22px !important;padding:14px 16px !important;font-family:'JetBrains Mono',monospace;letter-spacing:2px;text-align:center;height:56px;flex:1;border-radius:7px 0 0 7px;min-width:0;}
-.scan-input-area input::placeholder{letter-spacing:0;font-size:14px;color:var(--text3);}
-.scan-cam-btn{flex-shrink:0;width:52px;height:56px;font-size:22px;background:var(--surface2);border:1px solid var(--border);border-left:none;color:var(--text2);cursor:pointer;border-radius:0 7px 7px 0;transition:all .15s;display:flex;align-items:center;justify-content:center;}
-.scan-cam-btn:hover{background:var(--accent-dim);color:var(--accent);border-color:var(--accent);}
-.scan-cam-btn.active{background:var(--green);color:#fff;border-color:var(--green);}
+/* 摄像头开关大按钮（居中显示，唯一可见操作入口） */
+.scan-cam-toggle-wrap{display:flex;justify-content:center;margin-bottom:14px;}
+.scan-cam-toggle{display:inline-flex;align-items:center;gap:10px;padding:14px 36px;border-radius:12px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-family:inherit;font-size:15px;font-weight:600;transition:all .15s;}
+.scan-cam-toggle:hover{background:var(--accent-dim);color:var(--accent);border-color:var(--accent);}
+.scan-cam-toggle.active{background:var(--green);color:#fff;border-color:var(--green);box-shadow:0 4px 16px rgba(34,197,94,.3);}
+.scan-cam-toggle.active:hover{background:var(--green);color:#fff;}
+.scan-cam-toggle .cam-icon{font-size:20px;line-height:1;}
+.scan-cam-toggle .cam-text{line-height:1;}
 
-/* ── 快速数量按钮 ── */
-.qty-quick-bar{display:flex;gap:4px;align-items:center;flex-wrap:wrap;}
-.qty-quick-bar .btn{min-width:32px;}
-.qty-quick-bar input{text-align:center;width:70px !important;font-size:16px;font-weight:600;}
+/* 快捷键 */
+.scan-shortcuts{display:flex;align-items:center;gap:6px;margin-left:auto;color:var(--text3);}
+.shortcut-label{color:var(--text3);}
+.scan-options .shortcut-hint{font-family:'JetBrains Mono',monospace;padding:2px 6px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--text3);}
 
-/* ── 移动端适配 ── */
-@media (max-width: 600px) {
-    .scan-mode-bar .pill{font-size:12px;padding:8px 10px;}
-    .scan-input-area input{font-size:16px !important;padding:10px 8px !important;letter-spacing:1px;height:44px;border-radius:7px 0 0 7px;}
-    .scan-input-area input::placeholder{font-size:11px;}
-    .scan-cam-btn{width:40px;height:44px;font-size:18px;border-radius:0 7px 7px 0;}
-    .today-stats{gap:6px;}
-    .today-stat{padding:8px 10px;min-width:60px;}
-    .today-stat .stat-num{font-size:16px;}
-    .today-stat .stat-label{font-size:10px;}
-    .scan-options{font-size:10px;gap:6px;}
-    .scan-options .shortcut-hint{font-size:9px;padding:1px 4px;}
-    .device-status-bar{gap:6px;}
-    .device-status{font-size:10px;padding:4px 8px;}
-    .device-modal{max-width:95vw;max-height:90vh;}
-    .device-modal-header{font-size:13px;padding:12px 14px;}
-    .device-modal-body{padding:12px 14px;}
-    .device-modal-footer{padding:10px 14px;flex-direction:column;gap:8px;align-items:stretch;}
-    .device-modal-footer .btn{width:100%;}
-    .device-item{padding:8px 10px;}
-    .device-item-icon{font-size:18px;}
-    .device-item-name{font-size:12px;}
-    .form-row{flex-direction:column;}
-    .form-group{margin-bottom:8px;}
-    .card-pad{padding:12px;}
-    .scan-toast{min-width:auto;max-width:90vw;font-size:12px;padding:10px 16px;}
-    .qty-quick-bar input{width:50px !important;font-size:14px;}
-    .qty-quick-bar .btn{padding:6px 8px;font-size:12px;}
-}
-.scan-flash{animation:scanFlash .4s ease;}
-@keyframes scanFlash{0%{background:rgba(34,197,94,.2);}100%{background:transparent;}}
-.scan-flash-err{animation:scanFlashErr .4s ease;}
-@keyframes scanFlashErr{0%{background:rgba(239,68,68,.2);}100%{background:transparent;}}
+/* 连续扫码选项 */
+.scan-options{display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text2);}
+.scan-options label{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;}
+.scan-options input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer;}
 
-/* ── 扫码结果弹窗 ── */
-.scan-toast{position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:500;padding:14px 28px;border-radius:10px;font-size:14px;font-weight:600;text-align:center;min-width:280px;box-shadow:0 6px 24px rgba(0,0,0,.5);animation:toastIn .3s ease;pointer-events:none;}
+/* 摄像头扫码区域 */
+.camera-section{display:none;margin-bottom:14px;}
+.camera-section.open{display:block;}
+.camera-view-outer{max-width:400px;margin:0 auto;}
+.camera-view-wrap{width:100%;aspect-ratio:1/1;position:relative;background:#1a1a2e;border-radius:8px;overflow:hidden;}
+#cameraView{width:100% !important;height:100% !important;border-radius:8px;overflow:hidden;background:#1a1a2e;position:relative;}
+#cameraView video{width:100% !important;height:100% !important;display:block;object-fit:cover !important;}
+#cameraView .html5-qrcode__scan_region img,
+#cameraView .html5-qrcode__overlay,
+#cameraView .html5-qrcode__dashboard_section,
+#cameraView .html5-qrcode__scan_region > div:first-child{display:none !important;}
+#cameraView .html5-qrcode__scan_region{border:none !important;background:transparent !important;box-shadow:none !important;}
+.camera-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1a2e;border-radius:8px;z-index:5;text-align:center;}
+.camera-placeholder .ph-icon{font-size:36px;margin-bottom:8px;}
+.camera-placeholder .ph-text{font-size:12px;color:var(--text3);}
+.scan-overlay{position:absolute;inset:0;pointer-events:none;z-index:10;display:none;}
+.scan-overlay.show{display:block;}
+.scan-box-outer{position:absolute;top:7.5%;left:7.5%;width:85%;height:85%;border:2px solid rgba(255,255,255,0.35);border-radius:6px;box-sizing:border-box;}
+.scan-box-inner{position:absolute;top:15%;left:15%;width:70%;height:70%;border:2px solid rgba(255,255,255,0.85);border-radius:4px;box-sizing:border-box;}
+.scan-box-inner::before,.scan-box-inner::after,.scan-box-outer::before,.scan-box-outer::after{content:'';position:absolute;width:18px;height:18px;border:3px solid #fff;}
+.scan-box-inner::before{top:-3px;left:-3px;border-right:none;border-bottom:none;border-radius:4px 0 0 0;}
+.scan-box-inner::after{top:-3px;right:-3px;border-left:none;border-bottom:none;border-radius:0 4px 0 0;}
+.scan-box-outer::before{bottom:-3px;left:-3px;border-right:none;border-top:none;border-radius:0 0 0 4px;}
+.scan-box-outer::after{bottom:-3px;right:-3px;border-left:none;border-top:none;border-radius:0 0 4px 0;}
+.scan-hint-text{position:absolute;bottom:8%;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.7);white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,0.8);}
+.camera-controls{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;max-width:400px;margin-left:auto;margin-right:auto;}
+.camera-status{color:var(--text2);margin-left:auto;}
+
+/* Toast弹窗 */
+.scan-toast{position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:500;border-radius:10px;font-weight:600;text-align:center;box-shadow:0 6px 24px rgba(0,0,0,.5);animation:toastIn .3s ease;pointer-events:none;}
 .scan-toast.success{background:var(--green);color:#fff;}
 .scan-toast.error{background:var(--red);color:#fff;}
 .scan-toast.warning{background:var(--yellow);color:#000;}
 .scan-toast.fadeout{animation:toastOut .5s ease forwards;}
-@keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(-20px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}
-@keyframes toastOut{from{opacity:1;}to{opacity:0;}}
 
-/* ── 今日统计 ── */
-.today-stats{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
-.today-stat{flex:1;min-width:100px;padding:12px 16px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);text-align:center;}
-.today-stat .stat-num{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;}
-.today-stat .stat-label{font-size:11px;color:var(--text2);margin-top:2px;}
-.today-stat.in-stat .stat-num{color:var(--green);}
-.today-stat.out-stat .stat-num{color:var(--red);}
+/* 扫码结果弹窗 */
+.modal-overlay{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;animation:fadeIn .2s ease;padding:16px;}
+.modal-overlay .modal{animation:slideUp .25s ease;}
+.info-table td{vertical-align:middle;}
+.info-table td:first-child{color:var(--text2);}
 
-/* ── 摄像头扫码区域 ── */
-.camera-section{display:none;margin-bottom:14px;}
-.camera-section.open{display:block;}
-#cameraView{width:100%;border-radius:8px;overflow:hidden;background:#000;position:relative;min-height:240px;}
-#cameraView video{width:100%;display:block;}
-.camera-controls{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;}
-.camera-status{font-size:12px;color:var(--text2);margin-left:auto;}
-.camera-flash{animation:cameraFlash .3s ease;}
-@keyframes cameraFlash{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.6);}50%{box-shadow:0 0 0 6px rgba(34,197,94,0);}}
-
-/* ── 连续扫码选项 ── */
-.scan-options{display:flex;gap:12px;margin-bottom:14px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text2);}
-.scan-options label{display:flex;align-items:center;gap:5px;cursor:pointer;}
-.scan-options input[type=checkbox]{accent-color:var(--accent);}
-.scan-options .shortcut-hint{font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--text3);}
-
-/* ── HTTPS 提示 ── */
-.https-notice{display:none;padding:10px 14px;border-radius:8px;background:var(--yellow-dim);border:1px solid rgba(245,158,11,.3);color:var(--yellow);font-size:12px;margin-bottom:14px;line-height:1.6;}
-.https-notice.show{display:block;}
-.https-notice code{background:rgba(0,0,0,.2);padding:2px 6px;border-radius:4px;font-size:11px;}
-
-/* ── 平台选择下拉 ── */
-.platform-select{font-family:inherit;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:7px;font-size:13px;width:100%;outline:none;}
-.platform-select:focus{border-color:var(--accent);}
-
-/* ── 设备选择弹窗 ── */
+/* 设备选择弹窗 */
 .device-modal-overlay{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;animation:fadeIn .2s ease;}
-.device-modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;max-width:460px;width:90%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.5);animation:slideUp .25s ease;}
-.device-modal-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600;}
+.device-modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;width:90%;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.5);animation:slideUp .25s ease;}
+.device-modal-header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);font-weight:600;}
 .device-modal-close{background:none;border:none;font-size:22px;color:var(--text2);cursor:pointer;padding:0 4px;line-height:1;}
 .device-modal-close:hover{color:var(--text);}
-.device-modal-body{padding:16px 20px;overflow-y:auto;flex:1;}
+.device-modal-body{overflow-y:auto;flex:1;}
 .device-modal-desc{font-size:13px;color:var(--text2);margin:0 0 12px 0;line-height:1.5;}
-.device-modal-footer{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-top:1px solid var(--border);gap:12px;}
+.device-modal-footer{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);gap:12px;}
 .device-remember{font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap;}
 .device-remember input[type=checkbox]{accent-color:var(--accent);}
 .device-list{display:flex;flex-direction:column;gap:6px;}
-.device-item{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:9px;border:1px solid var(--border);cursor:pointer;transition:all .15s;background:var(--surface2);}
+.device-item{display:flex;align-items:center;gap:12px;border-radius:9px;border:1px solid var(--border);cursor:pointer;transition:all .15s;background:var(--surface2);}
 .device-item:hover{border-color:var(--accent);background:var(--accent-dim);}
 .device-item.selected{border-color:var(--accent);background:var(--accent-dim);box-shadow:0 0 0 1px var(--accent);}
-.device-item-icon{font-size:22px;flex-shrink:0;}
+.device-item-icon{flex-shrink:0;}
 .device-item-info{flex:1;min-width:0;}
-.device-item-name{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.device-item-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .device-item-id{font-size:10px;color:var(--text3);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
 .device-item-check{font-size:18px;color:var(--accent);flex-shrink:0;display:none;}
 .device-item.selected .device-item-check{display:block;}
+
 /* 扫码枪连接验证区 */
 .scanner-verify-area{padding:20px;background:var(--surface2);border-radius:9px;border:1px solid var(--border);text-align:center;}
 .scanner-verify-icon{font-size:40px;margin-bottom:12px;}
 .scanner-verify-timer{font-family:'JetBrains Mono',monospace;font-size:28px;font-weight:700;color:var(--accent);margin:10px 0;}
 .scanner-verify-bar{width:100%;height:4px;background:var(--surface);border-radius:2px;overflow:hidden;margin-top:12px;}
 .scanner-verify-bar-fill{height:100%;background:var(--accent);transition:width 1s linear;}
+
+/* HTTPS提示 */
+.https-notice{display:none;padding:10px 14px;border-radius:8px;background:var(--yellow-dim);border:1px solid rgba(245,158,11,.3);color:var(--yellow);font-size:12px;margin-bottom:14px;line-height:1.6;}
+.https-notice.show{display:block;}
+.https-notice code{background:rgba(0,0,0,.2);padding:2px 6px;border-radius:4px;font-size:11px;}
+
+/* 动画 */
+@keyframes scanRowHighlight{0%{background:var(--accent-dim);}100%{background:transparent;}}
+@keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(-20px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}
+@keyframes toastOut{from{opacity:1;}to{opacity:0;}}
 @keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
 @keyframes slideUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+@keyframes cameraFlash{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.6);}50%{box-shadow:0 0 0 6px rgba(34,197,94,0);}}
+.scan-row-highlight{animation:scanRowHighlight 1.5s ease;}
+.camera-flash{animation:cameraFlash .3s ease;}
 
-/* ── 扫码结果弹窗 ── */
-.modal-overlay{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;animation:fadeIn .2s ease;padding:16px;}
-.modal-overlay .modal{animation:slideUp .25s ease;}
-.info-table td{vertical-align:middle;}
-.info-table td:first-child{width:90px;color:var(--text2);}
+/* ── 2. PC端断点（≥769px）：仅尺寸和布局差异 ── */
+@media(min-width:769px){
+  .scan-cam-toggle{padding:16px 48px;font-size:16px;}
+  .scan-cam-toggle .cam-icon{font-size:22px;}
+  .device-status{padding:6px 12px;font-size:12px;}
+  .scan-hint-text{font-size:11px;}
+  .camera-status{font-size:12px;}
+  .scan-toast{padding:14px 28px;font-size:14px;min-width:280px;}
+  .info-table td:first-child{width:90px;}
+  .device-modal{max-width:460px;max-height:80vh;}
+  .device-modal-header{padding:16px 20px;font-size:15px;}
+  .device-modal-body{padding:16px 20px;}
+  .device-modal-footer{padding:12px 20px;}
+  .device-item{padding:10px 14px;}
+  .device-item-icon{font-size:22px;}
+  .device-item-name{font-size:13px;}
+  #recentScanTable{font-size:13px;}
+  #recentScanTable th,#recentScanTable td{padding:8px 10px;}
+}
 
-/* ── 移动端排版优化 ── */
-@media (max-width: 600px) {
-    .today-stats{gap:6px;}
-    .today-stat{padding:8px 10px;min-width:0;flex:1 1 calc(50% - 6px);}
-    .today-stat .stat-num{font-size:18px;}
-    .today-stat .stat-label{font-size:10px;}
-    .device-status-bar{gap:6px;}
-    .device-status{font-size:10px;padding:4px 8px;flex:1;}
-    .camera-section{margin-bottom:10px;}
-    #cameraView{min-height:200px;}
-    .camera-controls{gap:6px;}
-    .camera-controls .btn{font-size:11px;padding:6px 10px;}
-    .form-row{flex-direction:column;gap:10px;}
-    .form-row .form-group{min-width:0 !important;flex:1 !important;}
-    .qty-quick-bar{flex-wrap:wrap;gap:4px;}
-    .qty-quick-bar input{width:60px !important;}
-    .qty-quick-bar .btn{padding:6px 8px;font-size:12px;}
-    .modal-overlay{padding:12px;}
-    .modal-overlay .modal{max-width:100% !important;width:100%;}
-    .info-table td:first-child{width:70px;font-size:12px;}
-    .info-table td{font-size:13px !important;}
+/* ── 3. 移动端断点（≤768px）：仅尺寸和布局差异 ── */
+@media(max-width:768px){
+  .scan-cam-toggle{padding:12px 28px;font-size:14px;width:100%;justify-content:center;}
+  .scan-cam-toggle .cam-icon{font-size:18px;}
+  .scan-shortcuts{display:none;}
+  .scan-options{font-size:10px;gap:6px;}
+  .scan-options label{gap:3px;}
+  /* 移动端隐藏语音播报（浏览器权限限制无法稳定工作，后续版本升级） */
+  .voice-only-desktop{display:none !important;}
+  .camera-section{margin-bottom:10px;}
+  .camera-view-outer{max-width:100%;}
+  .scan-hint-text{font-size:10px;}
+  .camera-controls{gap:6px;}
+  .camera-controls .btn{font-size:11px;padding:6px 10px;}
+  .device-status-bar{gap:6px;}
+  .device-status{font-size:10px;padding:4px 8px;}
+  .device-modal{max-width:95vw;max-height:90vh;}
+  .device-modal-header{font-size:13px;padding:12px 14px;}
+  .device-modal-body{padding:12px 14px;}
+  .device-modal-footer{padding:10px 14px;flex-direction:column;gap:8px;align-items:stretch;}
+  .device-modal-footer .btn{width:100%;}
+  .device-item{padding:8px 10px;}
+  .device-item-icon{font-size:18px;}
+  .device-item-name{font-size:12px;}
+  .form-row{flex-direction:column;gap:10px;}
+  .form-row .form-group{min-width:0;flex:1;}
+  .form-group{margin-bottom:8px;}
+  .card-pad{padding:12px;}
+  .scan-toast{min-width:auto;max-width:90vw;font-size:12px;padding:10px 16px;}
+  .info-table td:first-child{width:70px;font-size:12px;}
+  .info-table td{font-size:13px;}
+  #recentScanTable{font-size:11px;}
+  #recentScanTable th,#recentScanTable td{padding:6px 8px;white-space:nowrap;}
+  #recentScanTable th:nth-child(6),#recentScanTable td:nth-child(6){display:none;}
+  .modal-overlay{padding:12px;}
+  .modal-overlay .modal{max-width:100%;width:100%;}
 }
 </style>
 
-<div class="main page-mid">
+<div class="main">
 <div class="glass-box">
 
 <?php if ($flash === 'ok'): ?>
@@ -265,16 +271,8 @@ require 'layout_head.php';
         <tr>
             <td>数量变化</td>
             <td style="font-family:'JetBrains Mono',monospace;font-weight:700;color:<?= $scanResult['type'] === 'scan_in' ? 'var(--green)' : 'var(--red)' ?>;">
-                <?= $scanResult['type'] === 'scan_in' ? '+' : '-' ?><?= $scanResult['qty'] ?>
+                <?= $scanResult['type'] === 'scan_in' ? '+' : '-' ?><?= $scanResult['qty'] ?>（当前库存 <?= $scanResult['qty_after'] ?>）
             </td>
-        </tr>
-        <tr>
-            <td>变化前</td>
-            <td style="font-family:'JetBrains Mono',monospace;"><?= $scanResult['qty_before'] ?></td>
-        </tr>
-        <tr>
-            <td>变化后</td>
-            <td style="font-family:'JetBrains Mono',monospace;font-weight:600;"><?= $scanResult['qty_after'] ?></td>
         </tr>
     </table>
 </div>
@@ -322,99 +320,91 @@ require 'layout_head.php';
     </div>
 </div>
 
-<!-- ── 今日统计 ── -->
-<div class="today-stats">
-    <div class="today-stat in-stat">
-        <div class="stat-num" id="todayInCount"><?= $todayIn ?></div>
-        <div class="stat-label">今日入库次数</div>
-    </div>
-    <div class="today-stat in-stat">
-        <div class="stat-num" id="todayInQty"><?= $todayInQty ?></div>
-        <div class="stat-label">今日入库数量</div>
-    </div>
-    <div class="today-stat out-stat">
-        <div class="stat-num" id="todayOutCount"><?= $todayOut ?></div>
-        <div class="stat-label">今日出库次数</div>
-    </div>
-    <div class="today-stat out-stat">
-        <div class="stat-num" id="todayOutQty"><?= $todayOutQty ?></div>
-        <div class="stat-label">今日出库数量</div>
-    </div>
-</div>
-
 <!-- ── 扫码输入卡片 ── -->
-<div class="card card-pad" style="margin-bottom:16px;">
-    <!-- 扫码类型切换 -->
-    <div class="scan-mode-bar">
-        <button type="button" class="pill out-pill active" id="pillOut" onclick="setScanType('scan_out')">📤 出库</button>
-        <button type="button" class="pill in-pill" id="pillIn" onclick="setScanType('scan_in')">📥 入库</button>
-    </div>
-
-    <!-- 扫码选项 -->
+<div class="card card-pad" style="margin-bottom:16px;position:relative;">
+    <!-- 扫码选项（仅保留连续扫码/声音/语音，无出入库选择/数量/平台控件） -->
     <div class="scan-options">
-        <label title="扫码后自动清空输入框，立即准备下一次扫描">
-            <input type="checkbox" id="continuousMode" checked> 连续扫码模式
+        <label title="扫码后自动准备下一次扫描">
+            <input type="checkbox" id="continuousMode" checked> 连续扫码
         </label>
         <label title="扫码成功后播放提示音">
             <input type="checkbox" id="soundEnabled" checked> 声音提示
         </label>
-        <span style="margin-left:auto;">快捷键：</span>
-        <span class="shortcut-hint">F1</span> 入库
-        <span class="shortcut-hint">F2</span> 出库
-        <span class="shortcut-hint">F3</span> 摄像头
+        <label title="扫码成功后语音播报结果" class="voice-only-desktop">
+            <input type="checkbox" id="voiceEnabled"> 语音播报
+        </label>
+        <button type="button" id="voiceActivateBtn" class="btn btn-ghost btn-xs voice-only-desktop" onclick="activateVoice()" style="display:none;color:var(--yellow);border-color:var(--yellow);font-size:10px;">开启语音权限</button>
+        <div class="scan-shortcuts">
+            <span class="shortcut-label">快捷键：</span>
+            <span class="shortcut-hint">F3</span> 摄像头
+        </div>
+    </div>
+
+    <!-- 摄像头开关大按钮（居中显示，唯一可见操作入口） -->
+    <div class="scan-cam-toggle-wrap">
+        <button type="button" class="scan-cam-toggle" id="scanCamToggle" onclick="toggleCamera()">
+            <span class="cam-icon">📷</span>
+            <span class="cam-text" id="scanCamToggleText">开启摄像头扫码</span>
+        </button>
     </div>
 
     <!-- 摄像头扫码区域 -->
     <div class="camera-section" id="cameraSection">
-        <div id="cameraView"></div>
+        <div class="camera-view-outer">
+            <div class="camera-view-wrap">
+                <div id="cameraView"></div>
+                <div class="camera-placeholder" id="cameraPlaceholder">
+                    <div>
+                        <div class="ph-icon">📷</div>
+                        <div class="ph-text">等待摄像头连接…</div>
+                    </div>
+                </div>
+                <div class="scan-overlay" id="scanOverlay">
+                    <div class="scan-box-outer"></div>
+                    <div class="scan-box-inner"></div>
+                    <div class="scan-hint-text">将二维码对准框内（灰色区域均可识别）</div>
+                </div>
+            </div>
+        </div>
         <div class="camera-controls">
-            <button type="button" class="btn btn-ghost btn-sm" id="cameraToggleBtn" onclick="toggleCamera()">📷 关闭摄像头</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="captureBtn" onclick="captureAndScan()" style="display:none;">📸 截图识别</button>
             <button type="button" class="btn btn-ghost btn-sm" id="torchBtn" onclick="toggleTorch()" style="display:none;">🔦 闪光灯</button>
             <span class="camera-status" id="cameraStatusText">📷 摄像头就绪</span>
         </div>
     </div>
 
-    <!-- 扫码表单 -->
+    <!-- 扫码表单（全部数据由二维码决定，无可见填写控件；隐藏 barcodeInput 兼容扫码枪） -->
     <form method="post" action="action.php" id="scanForm">
         <input type="hidden" name="_csrf" value="<?= csrf() ?>">
         <input type="hidden" name="action" id="scanAction" value="scan_out">
         <input type="hidden" name="ajax" id="scanAjax" value="1">
         <input type="hidden" name="order_no" id="scanOrderNo" value="">
         <input type="hidden" name="scan_source" id="scanSource" value="">
-        <!-- 扫码输入区：输入框 + 摄像头按钮 -->
-        <div class="scan-input-area">
-            <input type="text" name="barcode" id="barcodeInput" autocomplete="off" placeholder="扫码 / 输入商品编号后回车">
-            <button type="button" class="scan-cam-btn" id="scanCamBtn" onclick="toggleCamera()" title="摄像头扫码">📷</button>
-        </div>
-
-        <!-- 数量 + 平台 -->
-        <div class="form-row" style="margin-bottom:0;">
-            <div class="form-group" style="margin-bottom:0;flex:0 0 auto;min-width:280px;">
-                <label>数量</label>
-                <div class="qty-quick-bar">
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="adjQty(-1)" style="padding:8px 0;font-size:16px;font-weight:700;">−</button>
-                    <input type="number" name="qty" id="scanQty" value="1" min="1" style="font-family:'JetBrains Mono',monospace;">
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="adjQty(1)" style="padding:8px 0;font-size:16px;font-weight:700;">+</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="setQty(5)" style="font-size:12px;padding:6px 10px;">5</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="setQty(10)" style="font-size:12px;padding:6px 10px;">10</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="setQty(50)" style="font-size:12px;padding:6px 10px;">50</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="setQty(100)" style="font-size:12px;padding:6px 10px;">100</button>
-                </div>
-            </div>
-            <div class="form-group" style="margin-bottom:0;flex:1;min-width:160px;">
-                <label>平台</label>
-                <select name="platform_id" class="platform-select">
-                    <option value="0">-- 自动识别 --</option>
-                    <?php foreach ($platforms as $p): ?>
-                    <option value="<?= $p['id'] ?>" <?= ($p['is_default'] ?? 0) ? 'selected' : '' ?>>
-                        <?= h($p['name']) ?>
-                    </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-        </div>
+        <input type="hidden" name="internal_id" id="scanInternalId" value="0">
+        <input type="hidden" name="platform_code" id="scanPlatformCode" value="">
+        <input type="hidden" name="qty" id="scanQty" value="1">
+        <input type="hidden" name="model" id="scanModel" value="">
+        <!-- 隐藏输入框：仅用于接收扫码枪键盘输入（不占UI空间），摄像头开启时不聚焦 -->
+        <input type="text" name="barcode" id="barcodeInput" autocomplete="off" tabindex="-1" aria-hidden="true"
+               style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;">
     </form>
+
+    <!-- 扫码状态显示区（自动填充，只读展示解析结果） -->
+    <div class="scan-status-display" id="scanStatusDisplay" style="display:none;margin-top:12px;padding:10px 14px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);font-size:13px;">
+        <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">
+            <div class="status-row" style="display:flex;align-items:center;gap:6px;">
+                <span style="color:var(--text2);">操作类型</span>
+                <span id="statusType" style="font-weight:600;color:var(--accent);">入库</span>
+            </div>
+            <div class="status-row" style="display:flex;align-items:center;gap:6px;min-width:0;">
+                <span style="color:var(--text2);">型号</span>
+                <span id="statusModel" style="font-family:'JetBrains Mono',monospace;color:var(--text);word-break:break-all;">-</span>
+            </div>
+            <div class="status-row" style="display:flex;align-items:center;gap:6px;">
+                <span style="color:var(--text2);">数量</span>
+                <span id="statusQty" style="font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--green);">1</span>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- ── 扫码结果弹窗（仅显示信息，自动关闭） ── -->
@@ -434,7 +424,7 @@ require 'layout_head.php';
     <h3 style="font-size:15px;margin-bottom:12px;">最近扫描记录</h3>
     <div id="recentScanList">
     <?php if (empty($recentScans)): ?>
-    <div class="empty-state" style="padding:24px 0;">暂无扫描记录</div>
+    <div class="empty-state" style="padding:16px 0;color:var(--text3);font-size:12px;">暂无扫描记录</div>
     <?php else: ?>
     <div class="table-wrap" style="border-radius:8px;">
         <table style="font-size:12px;" id="recentScanTable">
@@ -445,8 +435,6 @@ require 'layout_head.php';
                     <th>型号</th>
                     <th>类型</th>
                     <th style="text-align:right">数量</th>
-                    <th style="text-align:right">变化前</th>
-                    <th style="text-align:right">变化后</th>
                     <th>备注</th>
                     <th style="width:50px;">操作</th>
                 </tr>
@@ -465,8 +453,6 @@ require 'layout_head.php';
                         <?php endif; ?>
                     </td>
                     <td style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;color:<?= $r['scan_type']==='in'?'var(--green)':'var(--red)' ?>;"><?= $r['qty'] ?></td>
-                    <td style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:11px;"><?= $r['qty_before'] ?></td>
-                    <td style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:11px;"><?= $r['qty_after'] ?></td>
                     <td style="font-size:11px;color:var(--text2);"><?= h($r['remark']) ?></td>
                     <td style="text-align:center;">
                         <button type="button" class="btn btn-ghost btn-xs" onclick="undoScan(<?= (int)$r['id'] ?>, this)" title="撤销此记录" style="color:var(--red);padding:2px 6px;font-size:12px;">↩</button>
@@ -488,6 +474,7 @@ require 'layout_head.php';
         <?php endfor; ?>
         <button type="button" class="page-btn" id="scanNextBtn" onclick="changeScanPage(1)">›</button>
         <span class="page-info">共 <?= $totalScanRows ?> 条</span>
+        <span class="page-jump"><input type="number" min="1" max="<?= $totalScanPages ?>" placeholder="页码" onkeydown="scanPageJump(event)"></span>
     </div>
     <?php endif; ?>
     <?php endif; ?>
@@ -498,12 +485,16 @@ require 'layout_head.php';
 <div class="card card-pad">
     <h3 style="font-size:15px;margin-bottom:10px;">使用提示</h3>
     <ul style="font-size:13px;color:var(--text2);padding-left:18px;line-height:2;">
-        <li><strong>摄像头扫码</strong>：点击📷按钮打开摄像头，对准二维码/条码自动识别。识别成功后弹出结果窗口（2秒自动关闭），期间暂停扫描，关闭后自动恢复。</li>
-        <li><strong>截图识别</strong>：若自动识别较慢，可点击"📸 截图识别"手动截取当前画面。系统会对截图进行8轮预处理容错（OTSU二值化、反转、中值滤波等），专治打印机断针、墨迹斑驳、光照不均等缺陷二维码，识别成功率大幅提升。</li>
-        <li><strong>扫码枪</strong>：首次使用请点击"连接"按钮验证。扫码枪输入后会自动提交并弹出结果。</li>
-        <li><strong>快速数量</strong>：使用 − / + 按钮微调数量，或直接点击 5/10/50/100 快速设置。</li>
+        <li><strong>二维码驱动</strong>：本页全部操作参数由二维码决定，无任何手动填写控件。扫描内部物料二维码后自动切换入库/出库、自动填充数量、自动匹配物料平台。</li>
+        <li><strong>内部物料二维码</strong>：格式 <code style="font-family:'JetBrains Mono',monospace;background:var(--surface2);padding:1px 6px;border-radius:3px;">{id:内部ID,pid:平台代码,model:型号,qty:数量,type:in|out}</code>。扫码后页面自动按 type 切换入库/出库状态，按 qty 填充操作数量，并在状态栏展示型号供人工核对。pid 为后台配置的平台代码（如 lcsc/huaqiu），便于跨数据库识别。</li>
+        <li><strong>立创采购二维码</strong>：识别立创商城二维码后强制入库，自动读取订单号、商品编号、型号、采购数量，页面同样无手动操作控件。</li>
+        <li><strong>操作入口</strong>：点击页面中央的"开启摄像头扫码"按钮启动摄像头，对准二维码自动识别；再次点击关闭。识别成功后弹出结果窗口（2秒自动关闭），期间暂停扫描，关闭后自动恢复。</li>
+        <li><strong>自动深度识别</strong>：当自动扫描连续未识别到二维码时，系统会自动截取当前画面并进行8轮预处理容错（OTSU二值化、反转、中值滤波等），专治打印机断针、墨迹斑驳、光照不均等缺陷二维码，无需手动操作。深度识别失败后会有5秒冷却期，避免频繁消耗CPU。</li>
+        <li><strong>扫码枪兼容</strong>：摄像头关闭时，页面自动接收扫码枪输入（隐藏输入框），扫码枪扫到二维码后会自动提交。摄像头开启时优先使用摄像头扫码。</li>
+        <li><strong>防重复扫码</strong>：5秒内扫描同一物料（按内部ID或编号去重）将被拒绝，提示"5秒内请勿重复扫码，请稍后再试"。</li>
+        <li><strong>语音播报</strong>（仅 PC 端）：勾选后扫码成功会用中文语音播报"入库N件"或"出库N件"，简短清晰，适合嘈杂环境或视线不在屏幕时使用。移动端因浏览器权限限制暂不支持。</li>
         <li><strong>撤销操作</strong>：在下方"最近扫描记录"中点击↩按钮可撤销对应记录，库存将回滚。</li>
-        <li><strong>快捷键</strong>：F1=入库模式，F2=出库模式，F3=切换摄像头。</li>
+        <li><strong>快捷键</strong>：F3=开启/关闭摄像头。</li>
         <li>出库时库存不足将自动扣减至 0，不会出现负数。</li>
     </ul>
     <div style="margin-top:12px;text-align:center;">
@@ -548,21 +539,216 @@ function playSuccessSound() { playBeep(880, 0.15, 'sine'); setTimeout(function()
 function playErrorSound()   { playBeep(200, 0.3, 'square'); }
 
 // ═══════════════════════════════════════════════════════════
-// 数量快速调整 + 震动反馈 + 撤销
+// 语音播报（Web Speech API）：仅播报"入库N件"或"出库N件"
+// 移动端音频权限：必须在用户手势同步上下文中激活 speechSynthesis
+var _voiceActivated = false;
+function activateVoice() {
+    if (_voiceActivated) return;
+    if (!('speechSynthesis' in window)) return;
+    try {
+        // iOS Safari 要求非空内容才能真正激活；用空格 + 0音量避免用户听到
+        var utter = new SpeechSynthesisUtterance(' ');
+        utter.volume = 0;
+        utter.lang = 'zh-CN';
+        utter.rate = 1;
+        window.speechSynthesis.speak(utter);
+        _voiceActivated = true;
+        // 持久化激活状态，避免刷新后丢失
+        try { localStorage.setItem('scan_voice_activated', '1'); } catch(e) {}
+    } catch(e) {}
+    var btn = document.getElementById('voiceActivateBtn');
+    if (btn) btn.style.display = 'none';
+}
+function checkVoicePermission() {
+    if (!('speechSynthesis' in window)) return;
+    var isMobile = window.innerWidth <= 768;
+    if (!isMobile) { _voiceActivated = true; return; }
+    // 移动端：勾选语音播报时，直接同步激活（在 change 事件的用户手势上下文中）
+    var cb = document.getElementById('voiceEnabled');
+    if (cb && cb.checked && !_voiceActivated) {
+        activateVoice();
+    }
+    var btn = document.getElementById('voiceActivateBtn');
+    if (btn) {
+        // 激活失败时仍显示按钮作为兜底（用户可手动点击）
+        btn.style.display = (!_voiceActivated && cb && cb.checked) ? 'inline-flex' : 'none';
+    }
+}
+// 语音播报checkbox变化时同步激活权限（必须在用户手势上下文中）
+document.addEventListener('DOMContentLoaded', function() {
+    // 恢复历史激活状态（仅作为参考，部分浏览器仍会要求重新手势激活）
+    try {
+        if (localStorage.getItem('scan_voice_activated') === '1') _voiceActivated = true;
+    } catch(e) {}
+    var cb = document.getElementById('voiceEnabled');
+    if (cb) cb.addEventListener('change', checkVoicePermission);
+});
+
+function speakResult(data) {
+    if (!document.getElementById('voiceEnabled').checked) return;
+    if (!data || !data.ok) return;
+    if (!('speechSynthesis' in window)) return;
+    // 移动端隐藏了语音播报选项，此处兜底防止异常触发
+    if (window.innerWidth <= 768) return;
+    if (!_voiceActivated) {
+        // 移动端未激活，显示激活按钮供用户手动点击
+        var btn = document.getElementById('voiceActivateBtn');
+        if (btn) btn.style.display = 'inline-flex';
+        return;
+    }
+    try {
+        var isIn = data.type === 'scan_in';
+        var action = isIn ? '入库' : '出库';
+        var qty = data.qty || 0;
+        var text = action + qty + '件';
+        var utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'zh-CN';
+        utter.rate = 1.2;
+        utter.volume = 1;
+        // Android Chrome 切换后台后会暂停 speechSynthesis，需 resume 恢复
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume();
+        window.speechSynthesis.speak(utter);
+    } catch(e) {}
+}
+
 // ═══════════════════════════════════════════════════════════
-function adjQty(delta) {
-    var el = document.getElementById('scanQty');
-    var v = parseInt(el.value) || 1;
-    el.value = Math.max(1, v + delta);
-}
-function setQty(val) {
-    document.getElementById('scanQty').value = Math.max(1, parseInt(val) || 1);
-}
+// 扫码状态显示 + 震动反馈
+// ═══════════════════════════════════════════════════════════
+// 全部数据由二维码决定，无手动数量调整函数
 function vibrate(pattern) {
     if (navigator.vibrate) { try { navigator.vibrate(pattern); } catch(e) {} }
 }
 
+// 更新扫码状态显示区（只读展示解析结果）
+function updateScanStatus(scanAction, model, qty) {
+    var display = document.getElementById('scanStatusDisplay');
+    var typeEl  = document.getElementById('statusType');
+    var modelEl = document.getElementById('statusModel');
+    var qtyEl   = document.getElementById('statusQty');
+    if (!display || !typeEl || !modelEl || !qtyEl) return;
+    var isIn = scanAction === 'scan_in';
+    typeEl.textContent = isIn ? '📥 入库' : '📤 出库';
+    typeEl.style.color = isIn ? 'var(--green)' : 'var(--red)';
+    modelEl.textContent = model || '-';
+    qtyEl.textContent = qty || 1;
+    qtyEl.style.color = isIn ? 'var(--green)' : 'var(--red)';
+    display.style.display = 'block';
+}
+
+// 重置扫码表单隐藏字段（每次扫码完成后调用）
+function resetScanFormFields() {
+    document.getElementById('scanInternalId').value = '0';
+    document.getElementById('scanPlatformCode').value = '';
+    document.getElementById('scanQty').value = '1';
+    document.getElementById('scanModel').value = '';
+    document.getElementById('scanOrderNo').value = '';
+    document.getElementById('scanSource').value = '';
+    document.getElementById('scanAction').value = 'scan_out';
+    document.getElementById('barcodeInput').value = '';
+    var display = document.getElementById('scanStatusDisplay');
+    if (display) display.style.display = 'none';
+}
+
 var lastScanData = null;
+
+// ═══════════════════════════════════════════════════════════
+// 最近扫描记录动态更新（无需刷新页面）
+// ═══════════════════════════════════════════════════════════
+function prependScanRecord(data) {
+    var listEl = document.getElementById('recentScanList');
+    if (!listEl) return;
+    // 如果当前显示「暂无扫描记录」，清空占位
+    var empty = listEl.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    var tbody = listEl.querySelector('#recentScanTable tbody');
+    if (!tbody) {
+        // 表格不存在（首次记录），需要创建完整表格结构
+        listEl.innerHTML = '<div class="table-wrap" style="border-radius:8px;">' +
+            '<table style="font-size:12px;" id="recentScanTable"><thead><tr>' +
+            '<th>时间</th><th>商品编号</th><th>型号</th><th>类型</th>' +
+            '<th style="text-align:right">数量</th><th>备注</th><th style="width:50px;">操作</th>' +
+            '</tr></thead><tbody></tbody></table></div>';
+        tbody = listEl.querySelector('#recentScanTable tbody');
+    }
+
+    var isIn = data.type === 'scan_in';
+    var typeBadge = isIn ? '<span class="badge badge-green">入库</span>' : '<span class="badge badge-red">出库</span>';
+    var qtyColor = isIn ? 'var(--green)' : 'var(--red)';
+    var tr = document.createElement('tr');
+    tr.className = 'scan-row scan-row-new';
+    tr.dataset.page = '1';
+    tr.innerHTML =
+        '<td style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--text2);">' + (data.created_at || '') + '</td>' +
+        '<td style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--accent);">' + (data.part_no || '') + '</td>' +
+        '<td style="font-family:\'JetBrains Mono\',monospace;font-size:11px;">' + (data.model || '-') + '</td>' +
+        '<td>' + typeBadge + '</td>' +
+        '<td style="text-align:right;font-family:\'JetBrains Mono\',monospace;font-weight:600;color:' + qtyColor + ';">' + (data.qty || 0) + '</td>' +
+        '<td style="font-size:11px;color:var(--text2);">' + (data.remark || '') + '</td>' +
+        '<td style="text-align:center;">' +
+            '<button type="button" class="btn btn-ghost btn-xs" onclick="undoScan(' + (data.scan_log_id || 0) + ', this)" title="撤销此记录" style="color:var(--red);padding:2px 6px;font-size:12px;">↩</button>' +
+        '</td>';
+    // 插入到 tbody 顶部
+    if (tbody.firstChild) {
+        tbody.insertBefore(tr, tbody.firstChild);
+    } else {
+        tbody.appendChild(tr);
+    }
+    // 限制记录数为30条
+    var rows = tbody.querySelectorAll('tr.scan-row');
+    if (rows.length > 30) {
+        rows[rows.length - 1].remove();
+    }
+    // 重新计算分页
+    rebuildScanPagination(tbody);
+    // 高亮新行（淡入效果）
+    setTimeout(function(){ tr.classList.add('scan-row-highlight'); }, 10);
+    setTimeout(function(){ tr.classList.remove('scan-row-new'); tr.classList.remove('scan-row-highlight'); }, 2000);
+}
+
+// 重建分页控件
+function rebuildScanPagination(tbody) {
+    var rows = tbody.querySelectorAll('tr.scan-row');
+    var total = rows.length;
+    var perPage = 10;
+    var totalPages = Math.max(1, Math.ceil(total / perPage));
+    // 重新分配 data-page
+    rows.forEach(function(row, i) {
+        row.dataset.page = Math.floor(i / perPage) + 1;
+    });
+    // 显示第一页
+    goToScanPage(1);
+    // 更新分页控件
+    var pagination = document.getElementById('scanPagination');
+    if (!pagination) return;
+    // 重建分页按钮
+    var prevBtn = pagination.querySelector('#scanPrevBtn');
+    var nextBtn = pagination.querySelector('#scanNextBtn');
+    var info = pagination.querySelector('.page-info');
+    // 移除旧页码按钮
+    pagination.querySelectorAll('[data-scan-page]').forEach(function(el){ el.remove(); });
+    // 插入新页码按钮
+    for (var p = 1; p <= totalPages; p++) {
+        var a = document.createElement('a');
+        a.className = 'page-btn' + (p === 1 ? ' active' : '');
+        a.setAttribute('data-scan-page', p);
+        a.textContent = p;
+        a.onclick = function(){ goToScanPage(parseInt(this.textContent)); };
+        if (nextBtn) {
+            pagination.insertBefore(a, nextBtn);
+        } else {
+            pagination.appendChild(a);
+        }
+    }
+    // 更新总数
+    if (info) info.textContent = '共 ' + total + ' 条';
+    // 更新页码直达输入框的 max 属性
+    var jumpInput = pagination.querySelector('.page-jump input');
+    if (jumpInput) jumpInput.setAttribute('max', totalPages);
+    // 隐藏分页如果只有1页
+    pagination.style.display = totalPages > 1 ? '' : 'none';
+}
 
 // 撤销指定扫码记录（从最近扫描记录列表调用）
 function undoScan(scanLogId, btn) {
@@ -581,20 +767,38 @@ function undoScan(scanLogId, btn) {
     .then(function(r){ return r.json(); })
     .then(function(data){
         if (data.ok) {
-            // 成功后保持按钮禁用（页面即将刷新）
             if (btn) { btn.disabled = true; btn.textContent = '✓ 已撤销'; }
             showToast('已撤销: ' + (data.part_no || ''), 'success');
             playSuccessSound();
             vibrate(30);
-            // 刷新页面以更新记录列表和统计
-            setTimeout(function(){ window.location.reload(); }, 600);
+            // 动态移除被撤销的行（无需刷新页面）
+            var tr = btn ? btn.closest('tr') : null;
+            if (tr) {
+                tr.style.transition = 'opacity .3s';
+                tr.style.opacity = '0.3';
+                setTimeout(function(){
+                    tr.remove();
+                    var tbody = document.querySelector('#recentScanTable tbody');
+                    if (tbody) {
+                        var remaining = tbody.querySelectorAll('tr.scan-row');
+                        if (remaining.length === 0) {
+                            // 无记录时显示空状态
+                            var listEl = document.getElementById('recentScanList');
+                            if (listEl) listEl.innerHTML = '<div class="empty-state" style="padding:24px 0;">暂无扫描记录</div>';
+                        } else {
+                            rebuildScanPagination(tbody);
+                        }
+                    }
+                }, 300);
+            }
         } else {
+            if (btn) { btn.disabled = false; btn.textContent = '↩'; }
             showToast('撤销失败: ' + (data.error || '未知错误'), 'error');
             playErrorSound();
         }
     })
     .catch(function(err){
-        if (btn) { btn.disabled = false; btn.textContent = '↩ 撤销'; }
+        if (btn) { btn.disabled = false; btn.textContent = '↩'; }
         showToast('网络错误，请重试', 'error');
     });
 }
@@ -669,7 +873,7 @@ function connectScanner() {
     body.innerHTML = '<div class="scanner-verify-area">' +
         '<div class="scanner-verify-icon">🔫</div>' +
         '<p style="font-size:14px;color:var(--text);margin-bottom:8px;">请使用扫码枪扫描任意条码以验证连接</p>' +
-        '<p style="font-size:12px;color:var(--text2);">将光标聚焦在输入框中，然后用扫码枪扫描任意条码</p>' +
+        '<p style="font-size:12px;color:var(--text2);">用扫码枪扫描任意条码进行验证（系统已自动接收输入）</p>' +
         '<div class="scanner-verify-timer"><span id="verifyTimer">15</span> 秒</div>' +
         '<div class="scanner-verify-bar"><div class="scanner-verify-bar-fill" id="verifyBar" style="width:100%;"></div></div>' +
         '<button class="btn btn-ghost btn-sm" style="margin-top:14px;" onclick="closeDeviceModal()">取消</button>' +
@@ -981,6 +1185,20 @@ function toggleCamera() {
     }
 }
 
+// 更新摄像头开关大按钮的视觉状态（active=true 表示摄像头工作中）
+function updateScanCamToggle(active) {
+    var btn = document.getElementById('scanCamToggle');
+    var txt = document.getElementById('scanCamToggleText');
+    if (!btn || !txt) return;
+    if (active) {
+        btn.classList.add('active');
+        txt.textContent = '关闭摄像头';
+    } else {
+        btn.classList.remove('active');
+        txt.textContent = '开启摄像头扫码';
+    }
+}
+
 // 判断是否为移动端
 function isMobile() {
     return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(navigator.userAgent) || window.innerWidth <= 768;
@@ -1007,7 +1225,7 @@ function startCamera() {
     cameraStatus.style.color = 'var(--text2)';
     dot.className = 'dot warn';
     dot.classList.add('pulse');
-    document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
+    updateScanCamToggle(true);
 
     // 超时保护：15秒未完成则强制停止
     var timeoutId = setTimeout(function() {
@@ -1055,12 +1273,13 @@ function startCamera() {
         html5QrCode = new Html5Qrcode("cameraView");
 
         var config = {
-            fps: 10,
+            fps: 15,
             qrbox: function(viewfinderWidth, viewfinderHeight) {
-                // 扫描区域取视频较短边的 80%（更大区域更易识别QR码）
+                // 解码区域 = 正方形（以容器短边为基准），占容器 85%
+                // 对应外层灰色识别框，二维码落在灰色区域内均可识别
+                // 底层 video 原始分辨率不受此尺寸影响，仅决定解码裁切范围
                 var minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-                var boxSize = Math.floor(minEdge * 0.8);
-                if (boxSize < 150) boxSize = 150;
+                var boxSize = Math.floor(minEdge * 0.85);
                 return { width: boxSize, height: boxSize };
             },
             formatsToSupport: [
@@ -1073,6 +1292,8 @@ function startCamera() {
             experimentalFeatures: {
                 useBarCodeDetectorIfSupported: true
             },
+            // 降低单帧解码失败日志噪音，提升性能
+            verbose: false,
         };
 
         // 第4步：用真实 deviceId 启动扫码
@@ -1082,18 +1303,19 @@ function startCamera() {
         clearTimeout(timeoutId);
         cameraStarting = false;
         cameraActive = true;
+        // 隐藏占位符，显示视频画面
+        var ph = document.getElementById('cameraPlaceholder');
+        if (ph) ph.style.display = 'none';
         cameraStatus.textContent = '✓ 摄像头就绪 - 对准条码';
         cameraStatus.style.color = 'var(--green)';
         dot.className = 'dot ok';
         dot.classList.remove('pulse');
         text.textContent = '摄像头工作中';
         text.style.color = 'var(--green)';
-        document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
-        var camBtn = document.getElementById('scanCamBtn');
-        if (camBtn) camBtn.classList.add('active');
-        // 显示手动截图识别按钮（作为自动识别的补充）
-        var captureBtn = document.getElementById('captureBtn');
-        if (captureBtn) captureBtn.style.display = '';
+        updateScanCamToggle(true);
+        // 显示自定义双层取景框
+        var overlay = document.getElementById('scanOverlay');
+        if (overlay) overlay.classList.add('show');
         // 检测是否支持闪光灯（torch）
         checkTorchSupport();
     }).catch(function(err) {
@@ -1121,7 +1343,13 @@ function startCamera() {
         dot.className = 'dot off';
         dot.classList.remove('pulse');
         cameraSection.classList.remove('open');
-        document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
+        updateScanCamToggle(false);
+        // 恢复占位符显示
+        var phErr = document.getElementById('cameraPlaceholder');
+        if (phErr) phErr.style.display = '';
+        // 启动失败时隐藏取景框
+        var overlayEl = document.getElementById('scanOverlay');
+        if (overlayEl) overlayEl.classList.remove('show');
         showToast(msg, 'error');
     });
 }
@@ -1134,15 +1362,19 @@ function forceStopCamera() {
     cameraActive = false;
     cameraStarting = false;
     document.getElementById('cameraView').innerHTML = '';
+    // 显示占位符，恢复等待连接状态
+    var ph = document.getElementById('cameraPlaceholder');
+    if (ph) ph.style.display = '';
     document.getElementById('cameraSection').classList.remove('open');
-    document.getElementById('cameraToggleBtn').textContent = '📷 关闭摄像头';
-    var camBtn = document.getElementById('scanCamBtn');
-    if (camBtn) camBtn.classList.remove('active');
+    updateScanCamToggle(false);
     // 隐藏截图识别按钮和闪光灯按钮
     var captureBtn = document.getElementById('captureBtn');
     if (captureBtn) captureBtn.style.display = 'none';
     var torchBtn = document.getElementById('torchBtn');
     if (torchBtn) torchBtn.style.display = 'none';
+    // 隐藏自定义取景框
+    var overlay = document.getElementById('scanOverlay');
+    if (overlay) overlay.classList.remove('show');
     var dot = document.getElementById('cameraDot');
     dot.className = 'dot off';
     dot.classList.remove('pulse');
@@ -1205,6 +1437,9 @@ function onScanSuccess(decodedText, decodedResult) {
     var input = document.getElementById('barcodeInput');
     var cameraView = document.getElementById('cameraView');
 
+    // 重置自动扫描失败计数
+    autoScanFailCount = 0;
+
     // 使用解码算法提取信息
     var result = ScanDecoder.decode(decodedText);
 
@@ -1213,37 +1448,53 @@ function onScanSuccess(decodedText, decodedResult) {
     setTimeout(function() { cameraView.classList.remove('camera-flash'); }, 300);
     playBeep(880, 0.1, 'sine');
 
-    if (ScanDecoder.isValidPartNo(result.partNo)) {
-        // 如果是立创二维码，自动切换入库模式并填充数据
-        if (result.autoAction === 'scan_in') {
-            setScanType('scan_in');
-            setQty(result.qty);
-            document.getElementById('scanOrderNo').value = result.orderNo;
-            document.getElementById('scanSource').value = 'lcsc_qr';
-        } else if (result.type === 'system_qr' && result.qty > 1) {
-            setQty(result.qty);
-            document.getElementById('scanOrderNo').value = '';
-            document.getElementById('scanSource').value = 'system_qr';
-        } else {
-            document.getElementById('scanOrderNo').value = '';
-            document.getElementById('scanSource').value = result.type;
-        }
-        // 设置输入框的编号
+    // 暂停摄像头扫描（防止弹窗期间重复识别）
+    pauseCameraScanning();
+
+    // 1. 内部物料二维码：自动切换入库/出库，自动填充 qty/internal_id/model/platform_code
+    if (result.type === 'internal_qr') {
+        var actionType = result.scanType === 'out' ? 'scan_out' : 'scan_in';
+        setScanType(actionType);
+        document.getElementById('scanInternalId').value = result.internalId;
+        document.getElementById('scanPlatformCode').value = result.platformCode || '';
+        document.getElementById('scanQty').value = result.qty;
+        document.getElementById('scanModel').value = result.model;
+        document.getElementById('scanOrderNo').value = '';
+        document.getElementById('scanSource').value = 'internal_qr';
+        // 输入框显示内部ID用于视觉反馈（不会作为 barcode 提交，后端按 internal_id 匹配）
+        input.value = '#内部' + result.internalId;
+        updateScanStatus(actionType, result.model, result.qty);
+        setTimeout(function() {
+            if (parseInt(document.getElementById('scanInternalId').value, 10) > 0) {
+                doScan();
+            }
+        }, 200);
+        return;
+    }
+
+    // 2. 立创外部采购二维码：强制入库，自动读取订单号和数量
+    if (result.type === 'lcsc_qr') {
+        setScanType('scan_in');
+        document.getElementById('scanInternalId').value = '0';
+        document.getElementById('scanPlatformCode').value = '';
+        document.getElementById('scanQty').value = result.qty;
+        document.getElementById('scanModel').value = result.model;
+        document.getElementById('scanOrderNo').value = result.orderNo;
+        document.getElementById('scanSource').value = 'lcsc_qr';
         input.value = result.partNo;
-
-        // 暂停摄像头扫描（防止弹窗期间重复识别）
-        pauseCameraScanning();
-
-        // 提交扫码
+        updateScanStatus('scan_in', result.model, result.qty);
         setTimeout(function() {
             if (input.value.trim() !== '') {
                 doScan();
             }
         }, 200);
-    } else {
-        input.value = decodedText;
-        showToast('⚠ 识别到内容但无法解析为编号: ' + decodedText.substring(0, 50), 'warning');
+        return;
     }
+
+    // 3. 其他类型（纯编号/URL/标签等）：无二维码携带的操作类型和数量，拒绝操作
+    input.value = '';
+    showToast('⚠ 请扫描内部物料二维码或立创商城二维码（需携带操作类型和数量）', 'warning');
+    resumeCameraScanning();
 }
 
 // ── 暂停/恢复摄像头扫描（弹窗期间暂停，关闭后恢复） ──
@@ -1259,60 +1510,66 @@ function resumeCameraScanning() {
 }
 
 function onScanFailure(error) {
-    // 每帧未识别到条码时的回调，无需处理
+    // 每帧未识别到条码时递增失败计数
+    // 连续失败达到阈值后自动触发深度识别（八种预处理容错）
+    autoScanFailCount++;
+    if (autoScanFailCount >= AUTO_DEEP_SCAN_THRESHOLD && !deepScanCooldown && !captureScanning && cameraActive) {
+        autoDeepScan();
+    }
 }
 
-// ── 手动截图识别（多轮预处理容错）──
-// 参考 batch_qr_reader.py 的多通道容错思路，对截图进行多轮预处理后逐一尝试解码
-// 专治打印机断针、墨迹斑驳、光照不均等缺陷二维码
+// ── 自动深度识别（多轮预处理容错）──
+// 当自动扫描连续失败时，自动截取当前视频帧进行八种预处理容错解码
+// 参考 batch_qr_reader.py 的多通道容错思路，专治打印机断针、墨迹斑驳、光照不均等缺陷二维码
 var captureScanning = false;
-function captureAndScan() {
-    if (captureScanning) return;
-    if (!cameraActive || !html5QrCode) {
-        showToast('摄像头未启动', 'error');
-        return;
-    }
+var autoScanFailCount = 0;           // 自动扫描失败计数
+var AUTO_DEEP_SCAN_THRESHOLD = 20;   // 连续失败20帧（约1.3秒@15fps）后触发深度识别
+var deepScanCooldown = false;        // 深度识别冷却标志
+var DEEP_SCAN_COOLDOWN_MS = 5000;    // 深度识别失败后冷却5秒，避免频繁触发消耗CPU
+
+function autoDeepScan() {
+    if (captureScanning || !cameraActive || !html5QrCode) return;
+    deepScanCooldown = true;
+    autoScanFailCount = 0;
+
     var videoEl = document.querySelector('#cameraView video');
     if (!videoEl || !videoEl.videoWidth) {
-        showToast('视频流未就绪，请稍候', 'warning');
+        setTimeout(function() { deepScanCooldown = false; }, DEEP_SCAN_COOLDOWN_MS);
         return;
     }
 
     captureScanning = true;
-    var captureBtn = document.getElementById('captureBtn');
-    var originalText = captureBtn.textContent;
-    captureBtn.textContent = '⏳ 深度识别中...';
-    captureBtn.disabled = true;
+    // 暂停自动扫描，避免深度识别期间重复触发
+    pauseCameraScanning();
 
     try {
-        // 截取当前视频帧到 canvas
+        // 截取当前视频帧到 canvas（使用原始分辨率）
         var canvas = document.createElement('canvas');
         canvas.width = videoEl.videoWidth;
         canvas.height = videoEl.videoHeight;
         var ctx = canvas.getContext('2d');
         ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
-        // 生成多轮预处理变体（原图 + 灰度二值化 + 反转 + 中值滤波等）
+        // 生成多轮预处理变体（原图 + OTSU二值化 + 反转 + 中值滤波等共8种）
         var variants = generatePreprocessedVariants(canvas, ctx);
 
         // 依次尝试每个预处理变体
-        tryDecodeVariants(variants, 0, captureBtn, originalText, function(decodedText, methodName) {
+        tryDecodeVariants(variants, 0, null, null, function(decodedText, methodName) {
             captureScanning = false;
-            captureBtn.textContent = originalText;
-            captureBtn.disabled = false;
             showToast('✓ 识别成功（通道: ' + methodName + '）', 'success');
             onScanSuccess(decodedText, null);
+            deepScanCooldown = false;
         }, function() {
             captureScanning = false;
-            captureBtn.textContent = originalText;
-            captureBtn.disabled = false;
-            showToast('⚠ 截图未识别到二维码，已尝试全部 ' + variants.length + ' 种预处理方案', 'warning');
+            // 恢复自动扫描
+            resumeCameraScanning();
+            // 冷却期后才能再次触发深度识别
+            setTimeout(function() { deepScanCooldown = false; }, DEEP_SCAN_COOLDOWN_MS);
         });
     } catch(e) {
         captureScanning = false;
-        captureBtn.textContent = originalText;
-        captureBtn.disabled = false;
-        showToast('截图识别失败: ' + (e.message || e), 'error');
+        resumeCameraScanning();
+        setTimeout(function() { deepScanCooldown = false; }, DEEP_SCAN_COOLDOWN_MS);
     }
 }
 
@@ -1464,37 +1721,43 @@ function tryDecodeVariants(variants, index, captureBtn, originalText, onSuccess,
     }, 'image/jpeg', 0.92);
 }
 
-// ── 防重复扫描 ──
-var recentScans = []; // {key, time}
-var DUPLICATE_WINDOW = 5000; // 5秒内相同码视为重复
+// ── 防重复扫描（对标商业扫码枪逻辑） ──
+// 商业扫码枪特征：同一码高速连续扫只处理一次；不同码可连续扫；
+// 同码间隔超过冷却期后允许再次扫描（入库流水线场景）
+var recentScans = []; // {key, time, count}
+var DUPLICATE_WINDOW = 5000;    // 同码冷却期 5 秒（用户要求：5秒内请勿重复扫码）
+var RAPID_REPEAT_MS = 800;      // 800ms 内同码视为"按键抖动/摄像头抖动"，静默忽略
+var scanInProgress = false;     // 全局扫描锁：AJAX 期间禁止新扫描
 
-function checkDuplicate(barcode, orderNo) {
-    var key = orderNo ? (orderNo + ':' + barcode) : barcode;
+function checkDuplicate(barcode, orderNo, internalId) {
+    // 内部二维码按 internal_id 去重；其他按 orderNo+barcode 去重
+    var key = internalId > 0
+        ? ('iid:' + internalId)
+        : (orderNo ? (orderNo + ':' + barcode) : barcode);
     var now = Date.now();
     // 清理过期记录
     recentScans = recentScans.filter(function(item) { return now - item.time < DUPLICATE_WINDOW; });
     // 检查是否重复
     for (var i = 0; i < recentScans.length; i++) {
-        if (recentScans[i].key === key) return true;
+        if (recentScans[i].key === key) {
+            var elapsed = now - recentScans[i].time;
+            if (elapsed < RAPID_REPEAT_MS) {
+                // 快速重复：摄像头抖动或手抖，静默忽略（不弹窗打扰）
+                return 'rapid';
+            }
+            // 冷却期内重复：提示用户
+            return 'cooldown';
+        }
     }
-    recentScans.push({ key: key, time: now });
+    recentScans.push({ key: key, time: now, count: 1 });
     return false;
 }
 
 // ═══════════════════════════════════════════════════════════
-// 切换扫码类型
+// 切换扫码类型（内部调用，无UI按钮，由二维码自动决定）
 // ═══════════════════════════════════════════════════════════
 function setScanType(type) {
     document.getElementById('scanAction').value = type;
-    var pillOut = document.getElementById('pillOut');
-    var pillIn  = document.getElementById('pillIn');
-    if (type === 'scan_out') {
-        pillOut.classList.add('active');
-        pillIn.classList.remove('active');
-    } else {
-        pillIn.classList.add('active');
-        pillOut.classList.remove('active');
-    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1503,14 +1766,28 @@ function setScanType(type) {
 function doScan() {
     var input = document.getElementById('barcodeInput');
     var barcode = input.value.trim();
-    if (barcode === '') return;
+    var internalId = parseInt(document.getElementById('scanInternalId').value, 10) || 0;
+    // 内部二维码扫码时 barcode 可为空（由 internal_id 匹配）；否则必须有 barcode
+    if (barcode === '' && internalId <= 0) return;
+
+    // 全局扫描锁：防止 AJAX 期间重复提交
+    if (scanInProgress) return;
 
     // 防重复扫描
     var orderNo = document.getElementById('scanOrderNo').value;
-    if (checkDuplicate(barcode, orderNo)) {
-        showScanResultModal({ ok: false, error: '重复扫描，已忽略（5秒内同一码只处理一次）' });
+    var dupResult = checkDuplicate(barcode, orderNo, internalId);
+    if (dupResult === 'rapid') {
+        // 快速重复（抖动）：静默忽略，不弹窗
         return;
     }
+    if (dupResult === 'cooldown') {
+        // 冷却期内重复：温和提示，不阻塞后续扫描
+        showToast('5秒内请勿重复扫码，请稍后再试', 'warning');
+        return;
+    }
+
+    // 加锁
+    scanInProgress = true;
 
     var form = document.getElementById('scanForm');
     var formData = new FormData(form);
@@ -1521,22 +1798,13 @@ function doScan() {
     })
     .then(function(r){ return r.json(); })
     .then(function(data){
+        scanInProgress = false; // 解锁
         if (data.ok) {
             playSuccessSound();
+            speakResult(data);
             vibrate(30);
-            // 更新今日统计
-            var isIn = data.type === 'scan_in';
-            if (isIn) {
-                var el = document.getElementById('todayInCount');
-                el.textContent = parseInt(el.textContent) + 1;
-                var el2 = document.getElementById('todayInQty');
-                el2.textContent = parseInt(el2.textContent) + data.qty;
-            } else {
-                var el3 = document.getElementById('todayOutCount');
-                el3.textContent = parseInt(el3.textContent) + 1;
-                var el4 = document.getElementById('todayOutQty');
-                el4.textContent = parseInt(el4.textContent) + data.qty;
-            }
+            // 动态插入最近扫描记录（无需刷新页面）
+            prependScanRecord(data);
         } else {
             playErrorSound();
             vibrate([100, 50, 100]);
@@ -1545,6 +1813,7 @@ function doScan() {
         showScanResultModal(data);
     })
     .catch(function(err){
+        scanInProgress = false; // 解锁
         playErrorSound();
         vibrate([100, 50, 100]);
         showScanResultModal({ ok: false, error: '网络错误，请重试' });
@@ -1592,9 +1861,8 @@ function closeScanResultModal() {
     // 清空输入框，准备下一次扫描
     var input = document.getElementById('barcodeInput');
     input.value = '';
-    document.getElementById('scanQty').value = 1;
-    document.getElementById('scanOrderNo').value = '';
-    document.getElementById('scanSource').value = '';
+    // 重置隐藏字段（qty/internal_id/model/order_no 等，全部由二维码决定）
+    resetScanFormFields();
     // 恢复摄像头扫描
     resumeCameraScanning();
 }
@@ -1615,35 +1883,48 @@ document.getElementById('barcodeInput').addEventListener('keydown', function(e) 
             if (scannerVerifyListening) {
                 onScannerVerifyInput();
             }
-            // 使用解码器智能识别码类型
+            // 使用解码器智能识别码类型（全部数据由二维码决定）
             var decoded = ScanDecoder.decode(val);
-            if (ScanDecoder.isValidPartNo(decoded.partNo)) {
-                if (decoded.autoAction === 'scan_in') {
-                    setScanType('scan_in');
-                    setQty(decoded.qty);
-                    document.getElementById('scanOrderNo').value = decoded.orderNo;
-                    document.getElementById('scanSource').value = 'lcsc_qr';
-                } else if (decoded.type === 'system_qr') {
-                    if (decoded.qty > 1) setQty(decoded.qty);
-                    document.getElementById('scanOrderNo').value = '';
-                    document.getElementById('scanSource').value = 'system_qr';
-                } else {
-                    document.getElementById('scanOrderNo').value = '';
-                    document.getElementById('scanSource').value = decoded.type;
-                }
-                this.value = decoded.partNo;
+            // 内部物料二维码：按 internal_id 操作
+            if (decoded.type === 'internal_qr') {
+                var actionType = decoded.scanType === 'out' ? 'scan_out' : 'scan_in';
+                setScanType(actionType);
+                document.getElementById('scanInternalId').value = decoded.internalId;
+                document.getElementById('scanPlatformCode').value = decoded.platformCode || '';
+                document.getElementById('scanQty').value = decoded.qty;
+                document.getElementById('scanModel').value = decoded.model;
+                document.getElementById('scanOrderNo').value = '';
+                document.getElementById('scanSource').value = 'internal_qr';
+                this.value = '#内部' + decoded.internalId;
+                updateScanStatus(actionType, decoded.model, decoded.qty);
+                doScan();
+                return;
             }
-            doScan();
+            // 立创外部采购二维码：强制入库
+            if (decoded.type === 'lcsc_qr') {
+                setScanType('scan_in');
+                document.getElementById('scanInternalId').value = '0';
+                document.getElementById('scanPlatformCode').value = '';
+                document.getElementById('scanQty').value = decoded.qty;
+                document.getElementById('scanModel').value = decoded.model;
+                document.getElementById('scanOrderNo').value = decoded.orderNo;
+                document.getElementById('scanSource').value = 'lcsc_qr';
+                this.value = decoded.partNo;
+                updateScanStatus('scan_in', decoded.model, decoded.qty);
+                doScan();
+                return;
+            }
+            // 其他类型：无操作类型和数量，拒绝操作
+            this.value = '';
+            showToast('⚠ 请扫描内部物料二维码或立创商城二维码（需携带操作类型和数量）', 'warning');
         }
     }
 });
 
 // ═══════════════════════════════════════════════════════════
-// 键盘快捷键
+// 键盘快捷键（出入库类型由二维码自动决定，仅保留 F3 摄像头切换）
 // ═══════════════════════════════════════════════════════════
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'F1') { e.preventDefault(); setScanType('scan_in'); }
-    if (e.key === 'F2') { e.preventDefault(); setScanType('scan_out'); }
     if (e.key === 'F3') { e.preventDefault(); toggleCamera(); }
 });
 
@@ -1651,6 +1932,7 @@ document.addEventListener('keydown', function(e) {
 // 页面初始化
 // ═══════════════════════════════════════════════════════════
 (function() {
+    // 出入库类型由二维码自动决定，无需初始化默认模式
     initScanner();
     initCamera();
 
@@ -1727,6 +2009,20 @@ function goToScanPage(page) {
 
 function changeScanPage(delta) {
     showScanPage(currentScanPage + delta);
+}
+
+function scanPageJump(e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    var raw = e.target.value.trim();
+    if (raw === '') return;
+    var p = parseInt(raw, 10);
+    var rows = document.querySelectorAll('.scan-row');
+    var totalPages = Math.max(1, Math.ceil(rows.length / 10));
+    if (isNaN(p) || p < 1) { e.target.value = ''; alert('请输入有效页码'); return; }
+    if (p > totalPages) p = totalPages;
+    e.target.value = p;
+    goToScanPage(p);
 }
 </script>
 

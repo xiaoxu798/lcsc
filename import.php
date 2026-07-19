@@ -80,6 +80,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excel'])) {
     $platId   = $pr ? (int)$pr['id'] : 1;
     $fmap     = $platformMaps[$platCode] ?? $platformMaps[$defaultPlat];
     $importId = bin2hex(random_bytes(16));
+    // 价格分层：导入时样品标记（勾选后本次导入所有物料不计入资产）
+    $importIsSample = !empty($_POST['is_sample']) ? 1 : 0;
     $ext      = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
 
     if ($file['error'] !== UPLOAD_ERR_OK) {
@@ -219,18 +221,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excel'])) {
                             $newStock = $existing['stock'] + $qty;
                             $db->prepare("UPDATE parts SET stock=?,update_time=NOW() WHERE id=? AND user_id=?")
                                ->execute([$newStock, $existing['id'], $dataUid]);
-                            $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
-                               ->execute([$uid, $existing['id'], $partNo, 'import', $qty, $existing['stock'], $newStock, '订单:'.$orderNo]);
+                            $importSubtotal = ($price > 0 && !$importIsSample) ? round($qty * $price, 4) : 0;
+                            $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,unit_cost,is_sample,subtotal,order_time,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+                               ->execute([$uid, $existing['id'], $partNo, 'import', $qty, $existing['stock'], $newStock, $price, $importIsSample, $importSubtotal, $otDb, '订单:'.$orderNo]);
                             if ($ptype) linkCategories($existing['id'], $dataUid, parseCategories($ptype));
                             $pid = $existing['id'];
                             $stats['updated']++;
                         } else {
                             // 新元器件阈值设为 NULL，继承全局阈值（最低优先级）
-                            $db->prepare("INSERT INTO parts (user_id,platform_id,platform_part_no,customer_part_no,model,product_name,product_type,package,brand,stock,low_stock_threshold) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-                               ->execute([$dataUid, $platId, $partNo, $cpn, $model, $pname, $ptype, $pkg, $brand, $qty, null]);
+                            // 生成全平台唯一的 internal_id
+                            $maxIdStmt = $db->prepare("SELECT COALESCE(MAX(internal_id),0) FROM parts WHERE user_id=?");
+                            $maxIdStmt->execute([$dataUid]);
+                            $nextInternalId = (int)$maxIdStmt->fetchColumn() + 1;
+                            $db->prepare("INSERT INTO parts (user_id,platform_id,internal_id,platform_part_no,customer_part_no,model,product_name,product_type,package,brand,stock,low_stock_threshold) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+                               ->execute([$dataUid, $platId, $nextInternalId, $partNo, $cpn, $model, $pname, $ptype, $pkg, $brand, $qty, null]);
                             $pid = (int)$db->lastInsertId();
-                            $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,remark) VALUES (?,?,?,?,?,?,?,?)")
-                               ->execute([$uid, $pid, $partNo, 'import', $qty, 0, $qty, '订单:'.$orderNo]);
+                            $importSubtotal = ($price > 0 && !$importIsSample) ? round($qty * $price, 4) : 0;
+                            $db->prepare("INSERT INTO stock_log (user_id,part_id,platform_part_no,change_type,qty_change,qty_before,qty_after,unit_cost,is_sample,subtotal,order_time,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+                               ->execute([$uid, $pid, $partNo, 'import', $qty, 0, $qty, $price, $importIsSample, $importSubtotal, $otDb, '订单:'.$orderNo]);
                             if ($ptype) linkCategories($pid, $dataUid, parseCategories($ptype));
                             $stats['inserted']++;
                         }
@@ -255,6 +263,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excel'])) {
                 // 记录已导入文件
                 $db->prepare("INSERT INTO imported_files (user_id,file_name,platform,total_rows,inserted,updated,skipped,errors) VALUES (?,?,?,?,?,?,?,?)")
                    ->execute([$uid, $file['name'], $platCode, count($rows)-$headerIdx-1, $stats['inserted'], $stats['updated'], $stats['skip'], $stats['errors']]);
+                traceLog($uid, 'import_order', 'imported_file', 0, "导入订单 文件:{$file['name']} 平台:{$platCode} 新增:{$stats['inserted']} 更新:{$stats['updated']} 跳过:{$stats['skip']} 错误:{$stats['errors']}");
 
             } catch (\Throwable $e) {
                 $error = $e->getMessage();
@@ -274,7 +283,7 @@ $pageTitle = '导入订单';
 $activePage = 'import';
 require 'layout_head.php';
 ?>
-<div class="main page-mid">
+<div class="main">
 <div class="glass-box">
 <h2 style="margin-bottom:6px;text-align:center">导入订单 Excel / CSV</h2>
 <p style="color:var(--text2);font-size:13px;margin-bottom:22px;text-align:center">支持立创商城「订单明细」和「物料明细对账单」两种格式</p>
@@ -303,6 +312,11 @@ require 'layout_head.php';
 <div id="fileInfo" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:7px;padding:9px 13px;margin-bottom:12px;font-size:13px">
     📎 <span id="fileName"></span>
 </div>
+
+<!-- 价格分层：样品标记（勾选后本次导入所有物料不计入资产） -->
+<label style="display:flex;align-items:center;gap:6px;margin-bottom:12px;cursor:pointer;font-size:12px;color:var(--text2)">
+    <input type="checkbox" name="is_sample" value="1" style="width:auto"> 样品不计资产（本次导入的所有物料不计入总资产和成本统计）
+</label>
 
 <button type="submit" class="btn btn-primary btn-full" style="padding:11px;font-size:14px">开始导入</button>
 </form>
