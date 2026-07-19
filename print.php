@@ -39,6 +39,7 @@ $pageTitle = '打印标签';
 <head>
 <meta charset="UTF-8">
 <title>打印标签</title>
+<!-- 第三方脚本：qrcode-generator v2.0.4 (MIT) by Kazuhiko Arase - https://github.com/kazuhikoarase/qrcode-generator -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.min.js"></script>
 <style>
 /* ── 打印基础样式 ── */

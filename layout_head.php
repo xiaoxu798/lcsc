@@ -21,6 +21,7 @@ header('Expires: 0');
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf" content="<?=h(csrf())?>">
 <title><?= h($pageTitle) ?> — <?= h($siteTitle) ?></title>
+<!-- 第三方脚本：Chart.js v4.4.0 (MIT) by Chart.js Contributors - https://github.com/chartjs/Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" crossorigin="anonymous"></script>
 <style>
 /* ── Theme variables ── */

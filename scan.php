@@ -1,4 +1,21 @@
 <?php
+/**
+ * scan.php - 扫码出入库页面
+ *
+ * 第三方脚本引用：
+ *   1. html5-qrcode v2.3.8 (Apache-2.0)
+ *      作者：mebjas (Maya Bisineki)
+ *      来源：https://github.com/mebjas/html5-qrcode
+ *      用途：摄像头实时扫码（CDN 引入，见本文件第 54 行）
+ *
+ * 自研脚本（借鉴思路）：
+ *   2. 八轮预测转换脚本 generatePreprocessedVariants() (本项目自研)
+ *      思路借鉴：Python 脚本 batch_qr_reader.py 的多通道预处理容错算法
+ *      原作者仓库：https://github.com/yuchong0430/batch-qr-reader
+ *      实现：使用浏览器 Canvas API 自研 JavaScript 实现
+ *      位置：本文件第 1579 行起
+ *      配套函数：calcOtsuThreshold / makeBinaryCanvas / downscaleGray / medianBlurGray / tryDecodeVariants
+ */
 declare(strict_types=1);
 require_once 'config.php';
 initDB();

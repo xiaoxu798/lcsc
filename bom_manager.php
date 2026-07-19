@@ -1,4 +1,14 @@
 <?php
+/**
+ * bom_manager.php - BOM 管理页面
+ *
+ * 第三方依赖：
+ *   PhpSpreadsheet ^2.0 (LGPL-3.0-or-later)
+ *   作者：PHPOffice
+ *   来源：https://github.com/PHPOffice/PhpSpreadsheet
+ *   引入方式：Composer 自动加载（见本文件第 106 行 require_once $autoload）
+ *   用途：BOM 批量出库 Excel 导出
+ */
 declare(strict_types=1);
 require_once 'config.php';
 require_once 'module_bom.php';

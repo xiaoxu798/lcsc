@@ -1,4 +1,14 @@
 <?php
+/**
+ * import.php - 物料批量导入页面
+ *
+ * 第三方依赖：
+ *   PhpSpreadsheet ^2.0 (LGPL-3.0-or-later)
+ *   作者：PHPOffice
+ *   来源：https://github.com/PHPOffice/PhpSpreadsheet
+ *   引入方式：Composer 自动加载（见本文件第 104 行 require_once $autoload）
+ *   用途：Excel/CSV 文件读取与解析
+ */
 declare(strict_types=1);
 require_once 'config.php';
 initDB();
