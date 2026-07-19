@@ -402,6 +402,98 @@ A: 进入「后台管理 → 网站设置」取消勾选「登录时自动检测
 
 ---
 
+## 开源致谢 / 第三方代码说明
+
+本系统在保持核心业务逻辑全部自研的前提下，引用、借鉴了若干开源脚本与第三方工具。以下逐条标注来源、协议与使用方式，向原作者致谢。
+
+### 一、自研代码（本项目原创）
+
+| 模块 | 说明 |
+|------|------|
+| PHP 后端八大业务模块 | `module_parts.php` / `module_stock.php` / `module_platform.php` / `module_assets.php` / `module_logs.php` / `module_trace.php` / `module_admin.php` / `module_bom.php` 及 `config.php`、`api.php`、`action.php` 全部为自研 |
+| 前端业务页面 | `index.php`、`scan.php`、`bom_manager.php`、`assets.php`、`log.php`、`admin.php`、`print.php`、`import.php`、`detail_ajax.php`、`layout_head.php` 等页面与内嵌脚本均为自研 |
+| 八轮预测转换脚本 | `scan.php` 内 `generatePreprocessedVariants()` 函数，自研 JavaScript 实现，见下方说明 |
+| 数据库结构 | 全部数据表设计、索引、约束均为自研 |
+
+### 二、二维码扫码解析 JS 脚本
+
+| 项 | 内容 |
+|------|------|
+| 名称 | html5-qrcode |
+| 版本 | 2.3.8 |
+| 引入位置 | [scan.php:54](scan.php#L54)（CDN 引入） |
+| 项目地址 | https://github.com/mebjas/html5-qrcode |
+| 作者 | mebjas (Maya Bisineki) |
+| 开源协议 | Apache License 2.0 |
+| 用途 | 摄像头实时扫码，支持 QR_CODE / CODE_128 / CODE_39 / EAN_13 / DATA_MATRIX 等多种码制 |
+| 协议链接 | https://www.apache.org/licenses/LICENSE-2.0 |
+
+### 三、八轮预测转换脚本（自研，借鉴思路）
+
+| 项 | 内容 |
+|------|------|
+| 实现位置 | [scan.php:1579](scan.php#L1579) `generatePreprocessedVariants()` 函数 |
+| 代码性质 | **自研 JavaScript 实现**，使用浏览器 Canvas API |
+| 思路借鉴 | 借鉴 Python 脚本 `batch_qr_reader.py` 的多通道预处理容错思路（该 Python 脚本不在本仓库内，仅作算法参考） |
+| 原作者仓库 | https://github.com/yuchong0430/batch-qr-reader |
+| 八轮预处理通道 | ① 原图直扫 → ② OTSU 二值化 → ③ OTSU 反转 → ④ 低阈值二值化(100) → ⑤ 低阈值反转 → ⑥ 高阈值二值化(160) → ⑦ 中值滤波 + OTSU → ⑧ 中值滤波 + OTSU 反转 |
+| 应用场景 | 解决打印机断针、墨迹斑驳、光照不均等缺陷二维码的识别问题 |
+| 配套函数 | `calcOtsuThreshold` / `makeBinaryCanvas` / `downscaleGray` / `medianBlurGray` / `tryDecodeVariants` 均为自研 |
+| 致谢 | 感谢原作者 yuchong0430 公开的多通道容错预处理思路，原项目地址：https://github.com/yuchong0430/batch-qr-reader |
+
+### 四、二维码生成 JS 脚本
+
+| 项 | 内容 |
+|------|------|
+| 名称 | qrcode-generator |
+| 版本 | 2.0.4 |
+| 引入位置 | [print.php:42](print.php#L42)（CDN 引入） |
+| 项目地址 | https://github.com/kazuhikoarase/qrcode-generator |
+| 作者 | Kazuhiko Arase |
+| 开源协议 | MIT License |
+| 用途 | 打印标签页生成物料二维码（QR 码） |
+| 协议链接 | https://opensource.org/licenses/MIT |
+
+### 五、前端图表库
+
+| 项 | 内容 |
+|------|------|
+| 名称 | Chart.js |
+| 版本 | 4.4.0 |
+| 引入位置 | [layout_head.php:24](layout_head.php#L24)（CDN 引入） |
+| 项目地址 | https://github.com/chartjs/Chart.js |
+| 作者 | Chart.js Contributors |
+| 开源协议 | MIT License |
+| 用途 | Dashboard 资产统计图表、价格趋势图、出入库趋势图渲染 |
+
+### 六、PHP 第三方库
+
+| 项 | 内容 |
+|------|------|
+| 名称 | PhpSpreadsheet |
+| 版本约束 | ^2.0 |
+| 引入位置 | [import.php:104](import.php#L104)、[bom_manager.php:106](bom_manager.php#L106)（Composer 自动加载） |
+| 项目地址 | https://github.com/PHPOffice/PhpSpreadsheet |
+| 作者 | PHPOffice |
+| 开源协议 | LGPL-3.0-or-later |
+| 用途 | Excel/CSV 文件读取与导出（物料批量导入、BOM 批量出库导出） |
+| 协议链接 | https://www.gnu.org/licenses/lgpl-3.0.html |
+
+### 七、CDN 服务
+
+| 服务 | 用途 |
+|------|------|
+| jsDelivr (`cdn.jsdelivr.net`) | 提供 html5-qrcode / qrcode-generator / chart.js 的 CDN 分发 |
+
+### 八、致谢声明
+
+- 感谢上述所有开源项目的作者与维护者，本系统在他们的工作基础上构建；
+- 所有第三方代码均保留原作者署名与协议声明，未做任何闭源处理；
+- 自研代码部分遵循项目自身协议发布；
+- 若有任何第三方代码标注遗漏或不当之处，欢迎通过开源仓库 Issue 反馈，我们将及时修正。
+
+---
+
 ## 开源地址
 
 - **Gitee（国内主仓库）**：[https://gitee.com/xiaoxu798/lcsc](https://gitee.com/xiaoxu798/lcsc)
